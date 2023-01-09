@@ -8,8 +8,8 @@ The program will compile and run the target file with embedded instrumentation, 
 The code coverage yielded by each new input is monitored, and any inputs yielding new code coverage will be added to the corpus.
 
 ```bash
-    git clone <project_url>
-    cd ECFuzz
+    git clone https://github.com/matt24smith/ecfuzz.git
+    cd ecfuzz
     cargo install --path .
     ecfuzz --target fuzz_target.c --corpus ./corpus/start --dictionary-path input/sample.dict --seed 000 --iterations 5000
 ```
