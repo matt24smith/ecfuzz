@@ -1,5 +1,23 @@
+//!
+//!Options for ``ecfuzz --mutate-stdin``
+//!```text
+//!Mutate input from stdin, and return the result to stdout
+//!
+//!Options:
+//!
+//!  -d, --dictionary-path <file>  Optionally supply a dictionary to enable random
+//!                                dictionary value insertion, and tokenized
+//!                                dictionary replacement
+//!
+//!  -s, --seed <seed>             Optionally seed the mutation
+//!
+//!Example:
+//!
+//!  echo 'Hello world!' | ecfuzz --mutate-stdin
+//!  echo 'Hello world!' | ecfuzz --mutate-stdin --dictionary-path input/sample.dict --seed 000
+//!```
+
 use std::collections::btree_map::Entry::Vacant;
-//use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::fs::read;
 use std::hash::Hasher;
@@ -9,6 +27,53 @@ use std::path::PathBuf;
 use xxhash_rust::xxh3::Xxh3;
 
 const MUTATIONS: f64 = 0.01;
+
+const HELP: &str = r#"
+Mutate input from stdin, and return the result to stdout
+
+Options:
+
+  -d, --dictionary-path <file>  Optionally supply a dictionary to enable random
+                                dictionary value insertion, and tokenized
+                                dictionary replacement
+
+  -s, --seed <seed>             Optionally seed the mutation
+
+Example:
+
+  echo 'Hello world!' | ecfuzz --mutate-stdin
+  echo 'Hello world!' | ecfuzz --mutate-stdin --dictionary-path input/sample.dict --seed 000
+
+"#;
+
+pub struct Mutation {
+    pub data: Vec<u8>,
+    pub dict: Option<BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
+    hasher: Xxh3,
+    //hasher: DefaultHasher,
+    hash_seed: [u8; 4],
+    mutators: Vec<for<'r> fn(&'r mut Mutation)>,
+}
+
+pub trait SeededMutation<'a> {
+    #[allow(clippy::new_ret_no_self)]
+    fn new(path: Option<PathBuf>, seed: Vec<u8>) -> Mutation {
+        let mut m = Mutation::new(path);
+        let _ = &m.hasher.write(&seed);
+        m
+    }
+}
+
+impl<'a> SeededMutation<'a> for Mutation {}
+
+/// Magic values consist of a tuple with byte size and a bytestring.
+/// Variants can be 1, 2, or 4 bytes length.
+#[derive(Copy, Clone)]
+enum Magic {
+    A((u8, [u8; 1])),
+    B((u8, [u8; 2])),
+    C((u8, [u8; 4])),
+}
 
 /// find all indices of matching substring in a raw binary vector
 fn byte_index(key: &Vec<u8>, bytes: &Vec<u8>) -> Vec<usize> {
@@ -47,6 +112,7 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
         if keypair.len() == 2 {
             key = keypair[0].to_owned();
             val = keypair[1].to_owned();
+            #[cfg(debug_assertions)]
             println!(
                 "token {:?} {:?}",
                 String::from_utf8_lossy(&key),
@@ -64,24 +130,6 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
         };
     }
     dict
-}
-
-pub struct Mutation {
-    pub data: Vec<u8>,
-    pub dict: Option<BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
-    hasher: Xxh3,
-    //hasher: DefaultHasher,
-    hash_seed: [u8; 4],
-    mutators: Vec<for<'r> fn(&'r mut Mutation)>,
-}
-
-/// Magic values consist of a tuple with byte size and a bytestring.
-/// Variants can be 1, 2, or 4 bytes length.
-#[derive(Copy, Clone)]
-enum Magic {
-    A((u8, [u8; 1])),
-    B((u8, [u8; 2])),
-    C((u8, [u8; 4])),
 }
 
 impl Mutation {
@@ -293,35 +341,6 @@ impl Mutation {
     }
 }
 
-pub trait SeededMutation<'a> {
-    #[allow(clippy::new_ret_no_self)]
-    fn new(path: Option<PathBuf>, seed: Vec<u8>) -> Mutation {
-        let mut m = Mutation::new(path);
-        let _ = &m.hasher.write(&seed);
-        m
-    }
-}
-
-impl<'a> SeededMutation<'a> for Mutation {}
-
-const HELP: &str = r#"
-Mutate input from stdin, and return the result to stdout
-
-Options:
-
-  -d, --dictionary-path <file>  Optionally supply a dictionary to enable random
-                                dictionary value insertion, and tokenized
-                                dictionary replacement
-
-  -s, --seed <seed>             Optionally seed the mutation 
-
-Example:
-
-  echo 'Hello world!' | fuzztest --mutate-stdin
-  echo 'Hello world!' | fuzztest --mutate-stdin --dictionary-path input/sample.dict
-
-"#;
-
 /// mutate bytes from stdin
 pub fn main() -> Result<(), std::io::Error> {
     let mut args: Vec<String> = vec![];
@@ -451,7 +470,6 @@ mod tests {
 
         mutation.mutate_dictionary_replacement();
         mutation.mutate_dictionary_replacement();
-        //mutation.mutate_dictionary_replacement();
 
         println!("tokenized:\t{}", String::from_utf8_lossy(&mutation.data))
     }

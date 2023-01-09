@@ -5,7 +5,7 @@ Evolutionary Coverage-guided Fuzzing engine. Requires Clang 14 and llvm tools.
 ### Quick Start
 There are 2 errors in ``fuzz_target.c``, occurring after some 'if' statements depending on user input.
 The program will compile and run the target file with embedded instrumentation, and send mutated inputs based on the samples in ``./corpus/start`` to the executable's standard input.
-The code coverage yielded by each new input is monitored, and any inputs yielding new code coverage will be added to the corpus.
+The code coverage of each new input is monitored, and any inputs yielding new code coverage will be added to the corpus.
 
 ```bash
 git clone https://github.com/matt24smith/ecfuzz.git
@@ -40,7 +40,7 @@ ecfuzz --help
 ```
 
 
-Another example for ``examples/example_lib.c`` and ``examples/example.c``, implementing a custom mutator to send input via arguments to the target executable
+Another example shows implementation of a custom fuzzer for ``examples/example_lib.c`` and ``examples/example.c``, sending inputs as arguments to the target executable
 ```bash
 cargo run --example=example_custom_fuzzer
 ```
