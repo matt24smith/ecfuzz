@@ -8,10 +8,10 @@ The program will compile and run the target file with embedded instrumentation, 
 The code coverage yielded by each new input is monitored, and any inputs yielding new code coverage will be added to the corpus.
 
 ```bash
-    git clone https://github.com/matt24smith/ecfuzz.git
-    cd ecfuzz
-    cargo install --path .
-    ecfuzz --target fuzz_target.c --corpus ./corpus/start --dictionary-path input/sample.dict --seed 000 --iterations 5000
+git clone https://github.com/matt24smith/ecfuzz.git
+cd ecfuzz
+cargo install --path .
+ecfuzz --target fuzz_target.c --corpus ./corpus/start --dictionary-path input/sample.dict --seed 000 --iterations 5000
 ```
 
 Initializing the fuzzing engine with seed 000 finds both bugs in this example after ~4700 attempts.
@@ -36,13 +36,13 @@ crashing input: ABCDEF000000000
 See the full list of options with the ``--help`` flag
 
 ```bash
-    ecfuzz --help
+ecfuzz --help
 ```
 
 
 Another example for ``examples/example_lib.c`` and ``examples/example.c``, implementing a custom mutator to send input via arguments to the target executable
 ```bash
-    cargo run --example=example_custom_fuzzer
+cargo run --example=example_custom_fuzzer
 ```
 
 
@@ -51,8 +51,8 @@ Another example for ``examples/example_lib.c`` and ``examples/example.c``, imple
 2. mutate one of the seeded inputs, and send it to the target via stdin
 3. measure code coverage as a set of code branches executed
 4. if a new branch is discovered by a mutation, add it to the corpus.
-  - 4b. compare the new branch coverage to all existing corpus entries,
-    and prune all entries with a subset of branch coverage
+  - 4b. compare the new branch coverage to existing corpus entries,
+    and prune entries that are a subset of the newest coverage
 
 
 ### Mutations
