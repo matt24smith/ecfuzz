@@ -60,7 +60,10 @@ pub struct Exec {
 impl Config {
     pub fn defaults() -> Self {
         Config {
+            #[cfg(not(target_os = "windows"))]
             cc_path: PathBuf::from("/usr/bin/clang"),
+            #[cfg(target_os = "windows")]
+            cc_path: PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe"),
             corpus_dir: PathBuf::from("./corpus/"),
             iter_check: 100, // frequency of printed status updates
             iterations: 10000,
@@ -78,6 +81,11 @@ impl Config {
             #[cfg(target_os = "macos")]
             llvm_cov_path: PathBuf::from("/Library/Developer/CommandLineTools/usr/bin/llvm-cov"),
 
+            #[cfg(target_os = "windows")]
+            llvm_profdata_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-profdata.exe"),
+            #[cfg(target_os = "windows")]
+            llvm_cov_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-cov.exe"),
+             
             dict_path: Some(PathBuf::from("input/sample.dict")),
             seed: "000".as_bytes().to_vec(),
             seed_corpus: vec![],
@@ -254,8 +262,9 @@ impl Exec {
             "-O1",
             "-fprofile-instr-generate",
             "-fcoverage-mapping",
-            // asan - very slow on arm64
+            // asan - very slow on windows and apple arm64 
             #[cfg(not(target_arch = "aarch64"))]
+            #[cfg(not(target_os = "windows"))]
             "-fsanitize=address",
             // usan
             "-fsanitize=undefined",

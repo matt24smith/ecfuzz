@@ -1,5 +1,8 @@
 /target
 a.out
+a.exp
+a.lib
+a.pdb
 asdf.c
 corpus/corpus
 corpus/corpus.coverage

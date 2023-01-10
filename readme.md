@@ -1,5 +1,5 @@
 ## ECFuzz
-Evolutionary Coverage-guided Fuzzing engine. Requires Clang 14 and llvm tools.
+Evolutionary Coverage-guided Fuzzing engine. Requires clang 14 and llvm tools.
 
 
 ### Quick Start
@@ -44,6 +44,9 @@ Another example shows implementation of a custom fuzzer for ``examples/example_l
 ```bash
 cargo run --example=example_custom_fuzzer
 ```
+
+Windows users can download clang+LLVM here: 
+https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/LLVM-14.0.6-win64.exe
 
 
 ### Distillation Strategy
