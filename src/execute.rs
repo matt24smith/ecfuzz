@@ -254,15 +254,16 @@ impl Exec {
             "-O1",
             "-fprofile-instr-generate",
             "-fcoverage-mapping",
-            // asan
+            // asan - very slow on arm64
+            #[cfg(not(target_arch = "aarch64"))]
             "-fsanitize=address",
-            // ubsan
+            // usan
             "-fsanitize=undefined",
-            // msan
+            // msan - not supported on apple arm64
+            // #[cfg(not(target_arch = "aarch64"))]
             //"-fsanitize=memory",
             // stack trace
             "-fno-optimize-sibling-calls",
-            //"-fsanitize-address-use-after-return=always",
             "-fno-omit-frame-pointer",
             #[cfg(target_arch = "aarch64")]
             "-arch",
