@@ -1,7 +1,6 @@
 ## ECFuzz
 Evolutionary Coverage-guided Fuzzing engine. Requires clang 14 and llvm tools.
 
-
 ### Quick Start
 There are 2 errors in ``fuzz_target.c``, occurring after some 'if' statements depending on user input.
 The program will compile and run the target file with embedded instrumentation, and send mutated inputs based on the samples in ``./corpus/start`` to the executable's standard input.
@@ -13,8 +12,9 @@ git clone https://github.com/matt24smith/ecfuzz.git && cd ecfuzz
 ecfuzz --target fuzz_target.c --corpus ./corpus/start --dictionary-path input/sample.dict --seed 000 --iterations 5000
 ```
 
-Initializing the fuzzing engine with seed 000 finds both bugs in this example after ~4700 attempts.
-The resulting mutations will be logged to the same directory as the ``start`` file.
+Initializing the fuzzing engine with seed 000 finds both bugs in ``fuzz_target.c`` after ~4700 attempts.
+Results will be deterministic as long as the corpus, dictionary, and seed remain unchanged.
+Mutations will be logged to the same directory as the ``start`` file.
 
 ```text
 ...
@@ -54,7 +54,7 @@ https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/LLVM-14.0.
 3. measure code coverage as a set of code branches executed
 4. if a new branch is discovered by a mutation, add it to the corpus.
   - 4b. compare the new branch coverage to existing corpus entries,
-    and prune entries that are a subset of the newest coverage
+    and prune entries with a coverage subset of the newest coverage
 
 
 ### Mutations
@@ -67,6 +67,7 @@ https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/LLVM-14.0.
 
 #### Dictionary mutations
 To enable dictionary mutations, a dictionary filepath must be included.
-Lines in the dictionary file containing `key` items will be inserted at random.
-Dictionary entries containing `key=value` will be inserted using tokenized replacement , e.g. mutate a `key` item in the seed input by replacing it with a `value`. 
+Lines in the dictionary file containing `key` items will be spliced into the input.
+Dictionary lines containing `key=value` will be inserted using tokenized replacement , e.g. mutate a `key` item in the seed input by replacing it with a `value`. 
 Keys are split on the first `=` symbol, and keys may be repeated on a new line for multiple values.
+
