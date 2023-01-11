@@ -36,7 +36,7 @@ void do_comparison(char* data) {
 
 int main() {
   char str1[256];
-  scanf_s("%255[^\n]s", str1);
+  scanf("%255[^\n]s", str1);
   do_comparison(str1);
   return 0;
 }

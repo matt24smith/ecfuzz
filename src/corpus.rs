@@ -8,10 +8,15 @@ pub struct CorpusInput {
     pub data: Vec<u8>,
     pub coverage: HashSet<u64>,
 }
+
 impl std::fmt::Debug for CorpusInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("\n    CorpusInput")
-            .field("data", &String::from_utf8_lossy(&self.data))
+        let mut maxlen = 64;
+        if &self.data.len() < &64 {
+            maxlen = self.data.len();
+        }
+        f.debug_struct("\n    CorpusInput: ")
+            .field("data", &String::from_utf8_lossy(&self.data[0..maxlen]))
             .field("coverage", &self.coverage)
             .finish()
     }
@@ -67,7 +72,7 @@ impl Corpus {
     /// all corpus entries with branch coverage that is a
     /// subset of the newest coverage will be pruned
     pub fn add_and_distill_corpus(&mut self, new_input: CorpusInput) {
-        println!("new branch hit! updating inputs... {}", self);
+        println!("new code coverage hit! updating inputs... {}", self);
         let diff: Vec<u64> = new_input
             .coverage
             .difference(&self.total_coverage)
@@ -122,7 +127,7 @@ impl Corpus {
 
 /// load a corpus of inputs from a single file, separated by newlines
 pub fn load_corpus(corpus_path: &PathBuf) -> Vec<Vec<u8>> {
-    let f: Vec<u8> = read(corpus_path).expect("reading file");
+    let f: Vec<u8> = read(corpus_path).expect("couldn't find corpus path!");
     let s = f
         .split(|x| x == &b'\n')
         .map(|x| x.to_vec())

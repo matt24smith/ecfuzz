@@ -50,21 +50,9 @@ pub struct Mutation {
     pub data: Vec<u8>,
     pub dict: Option<BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
     hasher: Xxh3,
-    //hasher: DefaultHasher,
     hash_seed: [u8; 4],
     mutators: Vec<for<'r> fn(&'r mut Mutation)>,
 }
-
-pub trait SeededMutation<'a> {
-    #[allow(clippy::new_ret_no_self)]
-    fn new(path: Option<PathBuf>, seed: Vec<u8>) -> Mutation {
-        let mut m = Mutation::new(path);
-        let _ = &m.hasher.write(&seed);
-        m
-    }
-}
-
-impl<'a> SeededMutation<'a> for Mutation {}
 
 /// Magic values consist of a tuple with byte size and a bytestring.
 /// Variants can be 1, 2, or 4 bytes length.
@@ -92,8 +80,8 @@ fn byte_index(key: &Vec<u8>, bytes: &Vec<u8>) -> Vec<usize> {
 pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
     let mut dict: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
 
-    let lines = read(dict_path)
-        .unwrap()
+    let lines = read(&dict_path)
+        .unwrap_or_else(|_| panic!("could not load dictionary from file! {:?}", dict_path))
         .split(|x| x == &b'\n')
         .map(|x| x.to_vec())
         .collect::<Vec<Vec<u8>>>();
@@ -129,6 +117,10 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
             dict.get_mut(&key).unwrap().push(val);
         };
     }
+    println!(
+        "loaded dictionary: {}",
+        dict_path.as_os_str().to_str().unwrap()
+    );
     dict
 }
 
@@ -166,11 +158,16 @@ impl Mutation {
                 data: vec![],
                 dict,
                 hasher: Xxh3::with_seed(0),
-                //hasher: DefaultHasher::new(),
                 hash_seed: [0x0_u8, 0x0_u8, 0x0_u8, 0x0_u8],
                 mutators,
             }
         }
+    }
+
+    pub fn with_seed(path: Option<PathBuf>, seed: Vec<u8>) -> Self {
+        let mut m = Mutation::new(path);
+        let _ = &m.hasher.write(&seed);
+        m
     }
 
     /// Hash number generator
@@ -228,15 +225,11 @@ impl Mutation {
                 n_size = self.data.len();
             }
             let mut sz = self.data.len() as usize - n_size as usize;
-            //let sz = (self.data.len() as i128 - n_size as i128).abs() as usize;
-            //#[cfg(debug_assertions)]
-            //assert!(sz != 0);
             if sz == 0 {
                 sz = 1
             }
             #[cfg(debug_assertions)]
             assert!(sz > 0);
-            //let idx = (self.hashfunc() as i128 % sz) as usize;
             let idx = self.hashfunc() % sz;
             self.data.splice(idx..idx + n_size, n);
         }
@@ -390,7 +383,7 @@ pub fn main() -> Result<(), std::io::Error> {
         }
     }
 
-    let mut mutation = <Mutation as SeededMutation>::new(dictpath, seed);
+    let mut mutation = Mutation::with_seed(dictpath, seed);
     mutation.data = input;
     mutation.mutate();
     let _w = writer.write(&mutation.data).unwrap();
@@ -414,7 +407,7 @@ mod tests {
     fn test_mutations() {
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
 
-        let mut mutation = <Mutation as SeededMutation>::new(None, vec![]);
+        let mut mutation = Mutation::new(None);
         mutation.data = test;
 
         mutation.mutate_magic();

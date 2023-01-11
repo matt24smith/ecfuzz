@@ -1,16 +1,37 @@
-use serde::Deserialize;
-use serde_json::Value as jsonValue;
 use std::collections::HashSet;
 use std::env::set_var;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::SystemTime;
+
+use serde::Deserialize;
+use serde_json::Value as jsonValue;
 
 use crate::corpus::{load_corpus, load_corpus_dir};
 use crate::mutator::main as mutate_stdin;
 
-const HELP: &str = r#"
-Mutate fuzz_target.c
+fn help() -> String {
+    use crate::mutator::Mutation;
+    let t = (SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap())
+    .as_secs()
+    .to_string();
+    let defaults = Config::defaults();
+    let mut mutator = Mutation::with_seed(None, t.as_bytes().to_vec());
+    mutator.data = defaults
+        .target_path
+        .as_os_str()
+        .to_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    mutator.mutate();
+    let header = String::from_utf8_lossy(&mutator.data);
+    let help = format!(
+        r#"
+Mutate {}
 
 Options:
 
@@ -20,25 +41,42 @@ Options:
 
   -s, --seed <seed>             Optionally seed the mutation engine with a given value
 
-  --mutate-stdin                The main event loop wont be run. Read data from
+  -, --mutate-stdin             The main event loop wont be run. Read data from
                                 stdin, and return mutated bytes to stdout. If
                                 used, the options below will be ignored.
 
-  -t, --target <fuzz_target.c>  Clang input file
+  -t, --target <fuzz_target.c>  Clang input file. Defaults to {}
 
-  -x, --compiler                Compiler path. Defaults to /usr/bin/clang on linux
+  -x, --compiler                Compiler path. Defaults to {}
 
-  --llvm-profdata-path          Path to llvm-profdata. Defaults to /usr/bin/llvm-profdata on linux
+  --llvm-profdata-path          Path to llvm-profdata. Defaults to {}
 
-  --llvm-cov-path               Path to llvm-cov. Defaults to /usr/bin/llvm-cov on linux
+  --llvm-cov-path               Path to llvm-cov. Defaults to {}
 
-  -i, --iterations              Maximum number of executions. Default 10_000
+  -i, --iterations              Total number of executions. Default {}
 
   -c, --corpus                  Initial corpus file, entries separated by newlines.
-                                Defaults to ./corpus/start
+                                Defaults to ./corpus/start. May be repeated
 
-  -d, --corpus_dir              Initialize corpus from a directory of files
-"#;
+  -C, --corpus-dir              Initialize corpus from a directory of files, one
+                                entry per file. May be repeated for multiple directories
+
+  -o, --object                  Object file given to llvm-cov. Defaults to ./a.out.
+                                May be repeated for multiple files.
+
+  -O, --object-files            Object files given to llvm-cov. Can be specified
+                                as a list of object files or by shell expansion
+"#,
+        //  -m --mutation-rate            Frequency of mutations to inputs. Default 0.01
+        header,
+        defaults.target_path.as_os_str().to_str().unwrap(),
+        defaults.cc_path.as_os_str().to_str().unwrap(),
+        defaults.llvm_profdata_path.as_os_str().to_str().unwrap(),
+        defaults.llvm_cov_path.as_os_str().to_str().unwrap(),
+        defaults.iterations,
+    );
+    help
+}
 
 pub struct Config {
     pub cc_path: PathBuf,
@@ -51,6 +89,7 @@ pub struct Config {
     pub dict_path: Option<PathBuf>,
     pub seed_corpus: Vec<Vec<u8>>,
     pub seed: Vec<u8>,
+    pub objects: Vec<PathBuf>,
 }
 
 pub struct Exec {
@@ -60,14 +99,15 @@ pub struct Exec {
 impl Config {
     pub fn defaults() -> Self {
         Config {
-            #[cfg(not(target_os = "windows"))]
-            cc_path: PathBuf::from("/usr/bin/clang"),
-            #[cfg(target_os = "windows")]
-            cc_path: PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe"),
             corpus_dir: PathBuf::from("./corpus/"),
             iter_check: 100, // frequency of printed status updates
             iterations: 10000,
             target_path: PathBuf::from("./fuzz_target.c"),
+
+            #[cfg(not(target_os = "windows"))]
+            cc_path: PathBuf::from("/usr/bin/clang"),
+            #[cfg(target_os = "windows")]
+            cc_path: PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe"),
 
             #[cfg(target_os = "linux")]
             llvm_profdata_path: PathBuf::from("/usr/bin/llvm-profdata"),
@@ -85,21 +125,24 @@ impl Config {
             llvm_profdata_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-profdata.exe"),
             #[cfg(target_os = "windows")]
             llvm_cov_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-cov.exe"),
-             
-            dict_path: Some(PathBuf::from("input/sample.dict")),
-            seed: "000".as_bytes().to_vec(),
+
+            dict_path: None,
+            //seed: "000".as_bytes().to_vec(),
+            seed: vec![],
             seed_corpus: vec![],
+            objects: vec![PathBuf::from("a.out")],
         }
     }
 
     /// parse command line options
     pub fn parse_args() -> Result<Self, Box<dyn std::error::Error>> {
-        if std::env::args().any(|x| x == *"--mutate-stdin") {
+        if std::env::args().any(|x| x == *"--mutate-stdin" || x == *"-") {
             mutate_stdin()?;
             std::process::exit(0);
         }
 
         let mut cfg: Config = Config::defaults();
+
         let mut args: Vec<String> = vec![];
         for arg in std::env::args() {
             for a in arg.splitn(2, '=') {
@@ -108,11 +151,10 @@ impl Config {
         }
 
         if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-            println!("{}", HELP);
+            println!("{}", help());
             std::process::exit(0);
         }
 
-        // parse dictionary path
         if args.contains(&"-d".to_string()) || args.contains(&"--dictionary-path".to_string()) {
             let mut stop = false;
             for arg in &args {
@@ -161,8 +203,6 @@ impl Config {
             }
         }
 
-        // sets clang compiler and llvm tools paths to default settings
-        // caution: default paths not yet defined for windows
         if args.contains(&"--llvm-profdata-path".to_string()) {
             let mut stop = false;
             for arg in &args {
@@ -197,30 +237,65 @@ impl Config {
             }
         }
 
-        // seed inputs for checking baseline coverage
         if args.contains(&"-c".to_string()) || args.contains(&"--corpus".to_string()) {
             let mut stop = false;
             for arg in &args {
                 if arg == "-c" || arg == "--corpus" {
                     stop = true
                 } else if stop {
-                    cfg.seed_corpus = load_corpus(&PathBuf::from(arg));
+                    cfg.seed_corpus
+                        .append(&mut load_corpus(&PathBuf::from(arg)));
                     cfg.corpus_dir = PathBuf::from(Path::new(&arg).parent().unwrap());
-                    break;
+                    stop = false
                 }
             }
-        } else if args.contains(&"-d".to_string()) || args.contains(&"--corpus_dir".to_string()) {
+        }
+
+        if args.contains(&"-C".to_string()) || args.contains(&"--corpus-dir".to_string()) {
             let mut stop = false;
             for arg in &args {
-                if arg == "-d" || arg == "--corpus_dir" {
+                if arg == "-C" || arg == "--corpus-dir" {
                     stop = true
                 } else if stop {
-                    cfg.seed_corpus = load_corpus_dir(&PathBuf::from(arg))?;
+                    cfg.seed_corpus
+                        .append(&mut load_corpus_dir(&PathBuf::from(arg))?);
                     cfg.corpus_dir = PathBuf::from(Path::new(&arg).parent().unwrap());
-                    break;
+                    stop = false
                 }
             }
-        } else {
+        }
+
+        if args.contains(&"-o".to_string()) || args.contains(&"--object".to_string()) {
+            let mut stop = false;
+            for arg in &args {
+                if arg == "-o" || arg == "--object" {
+                    stop = true
+                } else if stop {
+                    cfg.objects.push(PathBuf::from(arg));
+                    stop = false
+                }
+            }
+        }
+        if args.contains(&"-O".to_string()) || args.contains(&"--object-files".to_string()) {
+            let mut stop = false;
+            for arg in &args {
+                if arg == "-O" || arg == "--object-files" {
+                    stop = true;
+                } else if stop && arg[..1] != *"-" {
+                    cfg.objects.push(PathBuf::from(arg));
+                } else {
+                    stop = false;
+                }
+            }
+        }
+
+        /*
+        if cfg.objects.is_empty() {
+            cfg.objects.push(std::path::PathBuf::from("./a.out"));
+        }
+        */
+
+        if cfg.seed_corpus.is_empty() {
             cfg.seed_corpus = load_corpus(&PathBuf::from("./corpus/start"));
             cfg.corpus_dir = PathBuf::from("./corpus");
         }
@@ -255,14 +330,15 @@ impl Exec {
         }
 
         let setup_args: &[String] = &[
-            //"fuzz_target.c",
             (cfg.target_path.as_os_str().to_str().unwrap()),
+            //"-std=c17",
+            //"-pipe",
             "-o",
             "a.out",
             "-O1",
             "-fprofile-instr-generate",
             "-fcoverage-mapping",
-            // asan - very slow on windows and apple arm64 
+            // asan - very slow on windows and apple arm64
             #[cfg(not(target_arch = "aarch64"))]
             #[cfg(not(target_os = "windows"))]
             "-fsanitize=address",
@@ -281,11 +357,23 @@ impl Exec {
         ]
         .map(|s| s.to_string());
 
+        println!(
+            "compiling...\n{} {}\n",
+            &cfg.cc_path.as_os_str().to_str().unwrap(),
+            setup_args.join(" ")
+        );
+
         let setup_result = Command::new(&cfg.cc_path).args(setup_args).output()?;
         if !setup_result.stderr.is_empty() {
-            panic!("\n{}", String::from_utf8_lossy(&setup_result.stderr))
+            eprintln!(
+                "compile failed:\n{}\n{}",
+                String::from_utf8(setup_result.stdout)?,
+                String::from_utf8(setup_result.stderr)?,
+            );
+            panic!();
         }
         assert!(setup_result.stderr == b"");
+        println!("done compiling");
 
         Ok(())
     }
@@ -333,6 +421,7 @@ pub fn exec_target_args(
         eprintln!(
             "{}\ncrashing input: {:?}",
             String::from_utf8_lossy(&result.stderr),
+            //String::from_utf8_lossy(input),
             cmd_args
         );
         return Ok(true);
@@ -348,7 +437,7 @@ pub fn index_target_report(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let prof_merge_args = &[
         "merge".to_string(),
-        //"-sparse".to_string(),
+        "-sparse".to_string(),
         raw_profile_filepath.to_string(),
         "-o".to_string(),
         profile_filepath.to_string(),
@@ -367,20 +456,39 @@ fn read_report(
     cfg: &Config,
     profile_filepath: &str,
 ) -> Result<ReportFile, Box<dyn std::error::Error>> {
-    let prof_report_args = [
+    let mut prof_report_args: Vec<String> = vec![
         "export",
-        "--object",
-        "./a.out",
         "--instr-profile",
         profile_filepath,
+        //"--object",
+        //"./a.out",
     ]
-    .map(|s| s.to_string());
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    #[cfg(debug_assertions)]
+    assert!(!cfg.objects.is_empty());
+
+    for obj in &cfg.objects {
+        prof_report_args.push("--object".to_string());
+        prof_report_args.push(obj.as_os_str().to_string_lossy().to_string());
+    }
     let prof_report_result = Command::new(&cfg.llvm_cov_path)
         .args(&prof_report_args)
-        .output()?;
-    let prof_report_raw = &String::from_utf8(prof_report_result.stdout)?;
-    let prof_report_json: jsonValue = serde_json::from_str(prof_report_raw)?;
-    let prof_report: ReportFile = serde_json::from_value(prof_report_json["data"][0].clone())?;
+        .output()
+        .unwrap();
+    let prof_report_raw = prof_report_result.stdout;
+    if prof_report_raw.is_empty() {
+        panic!(
+            "empty profdata: {}\nargs: {:?}",
+            profile_filepath, prof_report_args
+        );
+    }
+    let prof_report_json: jsonValue =
+        serde_json::from_slice(&prof_report_raw).expect("reading profdata");
+    let prof_report: ReportFile = serde_json::from_value(prof_report_json["data"][0].clone())
+        .expect("could not parse JSON profdata!");
     Ok(prof_report)
 }
 

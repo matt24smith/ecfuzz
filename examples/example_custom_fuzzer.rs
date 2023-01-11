@@ -9,7 +9,6 @@ use ecfuzz::execute::{
     check_report_coverage, count_branch_total, exec_target_args, index_target_report, Config, Exec,
 };
 use ecfuzz::mutator::Mutation;
-use ecfuzz::mutator::SeededMutation;
 
 #[repr(C)]
 #[derive(Clone)]
@@ -101,7 +100,7 @@ impl MyTargetInput {
 impl MyFuzzEngine {
     pub fn new() -> Self {
         MyFuzzEngine {
-            mutation_engine: <Mutation as SeededMutation>::new(None, [].to_vec()),
+            mutation_engine: Mutation::new(None),
             firstname_seeds: load_corpus(&PathBuf::from("examples/firstname.dict")),
             lastname_seeds: load_corpus(&PathBuf::from("examples/lastname.dict")),
             data: MyTargetInput {
@@ -214,6 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cfg.iter_check = 8;
     cfg.target_path = PathBuf::from("./examples/example.c");
     cfg.iterations = 10_000;
+    cfg.objects = vec![PathBuf::from("./a.out")];
 
     // compile target with instrumentation
     Exec::initialize(&cfg)?;
@@ -226,9 +226,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         num1: 0,
         num2: 0,
         num3: 0,
-        str1: CString::from_vec_with_nul(b"\0".to_vec())?,
-        str2: CString::from_vec_with_nul(b"\0".to_vec())?,
-        str3: CString::from_vec_with_nul(b"\0".to_vec())?,
+        str1: CString::from_vec_with_nul(b"\0".to_vec()).unwrap(),
+        str2: CString::from_vec_with_nul(b"\0".to_vec()).unwrap(),
+        str3: CString::from_vec_with_nul(b"\0".to_vec()).unwrap(),
     };
     cov_corpus.add(seed.serialize(HashSet::new()));
 
@@ -249,7 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // run the program with mutated inputs, log crashes to crash corpus
         let args = engine.get_target_args();
-        let crashed = exec_target_args(rawprof, &args)?;
+        let crashed = exec_target_args(rawprof, &args).unwrap();
         if crashed {
             crash_corpus
                 .inputs

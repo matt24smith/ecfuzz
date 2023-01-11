@@ -5,7 +5,7 @@ use ecfuzz::corpus::{Corpus, CorpusInput};
 use ecfuzz::execute::{
     check_report_coverage, count_branch_total, exec_target, index_target_report, Config, Exec,
 };
-use ecfuzz::mutator::{Mutation, SeededMutation};
+use ecfuzz::mutator::Mutation;
 
 /// main loop:
 /// send input to target, read the coverage resulting from the input, and
@@ -31,16 +31,8 @@ pub fn _main_loop(
     for i in 0..cfg.iterations + 1 {
         // create a string name for this iteration
         let i_padded = format!("{:0>8}", i);
-        let profraw = format!(
-            "output/{}_id{:?}.profraw",
-            i_padded,
-            std::thread::current().id(),
-        );
-        let profdata = format!(
-            "output/{}_id{:?}.profdata",
-            i_padded,
-            std::thread::current().id(),
-        );
+        let profraw = format!("output/{}_id{:?}.profraw", i_padded, std::process::id(),);
+        let profdata = format!("output/{}_id{:?}.profdata", i_padded, std::process::id(),);
 
         // mutate the input
         let idx = mutation.hashfunc() % cov_corpus.inputs.len();
@@ -72,6 +64,8 @@ pub fn _main_loop(
         let coverage = check_report_coverage(cfg, &profdata)?;
         cov_time += cmd_timer.elapsed();
 
+        // if the report contains new coverate,
+        // add both to the corpus as CorpusInput
         if !cov_corpus.total_coverage.is_superset(&coverage) {
             let corpus_entry = CorpusInput {
                 data: mutation.data.clone(),
@@ -82,9 +76,13 @@ pub fn _main_loop(
 
         // print some status info
         if i % cfg.iter_check == 0 && i > 0 {
+            let mut max = 32;
+            if mutation.data.len() < max {
+                max = mutation.data.len();
+            }
             println!(
                 //"branch hits: {:>2}/{}  exec/s: {:.2}  ratio: {:.2}/{:.2}/{:.2}  inputs: {}  i: {:<4}  {}",
-                "branch hits: {:>2}/{}  exec/s: {:.2}  inputs: {}  i: {:<4}  {}",
+                "hits: {:>2}/{}  exec/s: {:.2}  inputs: {}  i: {:<4}  {}",
                 cov_corpus.total_coverage.len(),
                 branch_count,
                 cfg.iter_check as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
@@ -93,7 +91,7 @@ pub fn _main_loop(
                 //cov_time.as_millis() as f32 / 1000.0,
                 cov_corpus.inputs.len(),
                 i,
-                String::from_utf8_lossy(&mutation.data),
+                String::from_utf8_lossy(&mutation.data[0..max]),
             );
             exec_time = Duration::new(0, 0);
             profile_time = Duration::new(0, 0);
@@ -115,7 +113,7 @@ pub fn _main_loop(
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     // configure paths and initial state
     let cfg = Config::parse_args()?;
-    let mut engine = <Mutation as SeededMutation>::new(cfg.dict_path.clone(), cfg.seed.clone());
+    let mut engine = Mutation::with_seed(cfg.dict_path.clone(), cfg.seed.clone());
     let mut cov_corpus = Corpus::new();
 
     // compile target
@@ -126,6 +124,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profdata = "init.profdata";
 
     // check code coverage for seeded inputs
+    println!("seeding...");
     for input in &cfg.seed_corpus {
         assert!(!input.is_empty());
         let _caused_crash = exec_target(rawprof, input)?;
