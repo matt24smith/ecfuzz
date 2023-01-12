@@ -40,7 +40,7 @@ pub fn _main_loop(
         mutation.mutate();
 
         cmd_timer = Instant::now();
-        let caused_crash = exec_target(&profraw, &mutation.data)?;
+        let caused_crash = exec_target(cfg, &profraw, &mutation.data)?;
         exec_time += cmd_timer.elapsed();
 
         if caused_crash {
@@ -50,28 +50,32 @@ pub fn _main_loop(
                     .coverage
                     .clone(),
             });
-            remove_file(&profraw)?;
-            continue;
-        }
+            //remove_file(&profraw)?;
+            //continue;
+        } else {
+            // index the raw profile data
+            cmd_timer = Instant::now();
+            index_target_report(cfg, &profraw, &profdata).unwrap();
+            profile_time += cmd_timer.elapsed();
 
-        // index the raw profile data
-        cmd_timer = Instant::now();
-        index_target_report(cfg, &profraw, &profdata)?;
-        profile_time += cmd_timer.elapsed();
+            // generate JSON report from profile data
+            cmd_timer = Instant::now();
+            let coverage = check_report_coverage(cfg, &profdata).expect("getting report coverage");
+            cov_time += cmd_timer.elapsed();
 
-        // generate JSON report from profile data
-        cmd_timer = Instant::now();
-        let coverage = check_report_coverage(cfg, &profdata)?;
-        cov_time += cmd_timer.elapsed();
+            // file cleanup
+            remove_file(&profraw).expect("removing raw profile data");
+            remove_file(&profdata).expect("removing coverage profile data");
 
-        // if the report contains new coverate,
-        // add both to the corpus as CorpusInput
-        if !cov_corpus.total_coverage.is_superset(&coverage) {
-            let corpus_entry = CorpusInput {
-                data: mutation.data.clone(),
-                coverage,
-            };
-            cov_corpus.add_and_distill_corpus(corpus_entry);
+            // if the report contains new coverate,
+            // add both to the corpus as CorpusInput
+            if !cov_corpus.total_coverage.is_superset(&coverage) {
+                let corpus_entry = CorpusInput {
+                    data: mutation.data.clone(),
+                    coverage,
+                };
+                cov_corpus.add_and_distill_corpus(corpus_entry);
+            }
         }
 
         // print some status info
@@ -98,9 +102,6 @@ pub fn _main_loop(
             cov_time = Duration::new(0, 0);
             timer_start = Instant::now();
         }
-
-        remove_file(&profraw)?;
-        remove_file(&profdata)?;
     }
 
     cov_corpus.save(&cfg.corpus_dir, "mutations", false)?;
@@ -127,7 +128,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("seeding...");
     for input in &cfg.seed_corpus {
         assert!(!input.is_empty());
-        let _caused_crash = exec_target(rawprof, input)?;
+        let _caused_crash = exec_target(&cfg, rawprof, input)?;
         index_target_report(&cfg, rawprof, profdata)?;
 
         let corpus_entry = CorpusInput {

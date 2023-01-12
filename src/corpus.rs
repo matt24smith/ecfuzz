@@ -12,7 +12,7 @@ pub struct CorpusInput {
 impl std::fmt::Debug for CorpusInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut maxlen = 64;
-        if &self.data.len() < &64 {
+        if self.data.len() < 64 {
             maxlen = self.data.len();
         }
         f.debug_struct("\n    CorpusInput: ")
@@ -72,7 +72,6 @@ impl Corpus {
     /// all corpus entries with branch coverage that is a
     /// subset of the newest coverage will be pruned
     pub fn add_and_distill_corpus(&mut self, new_input: CorpusInput) {
-        println!("new code coverage hit! updating inputs... {}", self);
         let diff: Vec<u64> = new_input
             .coverage
             .difference(&self.total_coverage)
@@ -85,6 +84,7 @@ impl Corpus {
         self.inputs
             .retain(|i| !new_input.coverage.is_superset(&i.coverage));
         self.inputs.push(new_input);
+        println!("new code coverage hit! updated inputs... {}", self);
     }
 
     /// append corpus entries to the corpus file.

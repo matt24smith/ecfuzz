@@ -18,5 +18,5 @@ sample*.json
 output
 **a.out
 input/build.rs
-corpus/*.corpus
-corpus/*.coverage
+input/*.corpus
+input/*.coverage

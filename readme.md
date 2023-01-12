@@ -3,13 +3,13 @@ Evolutionary Coverage-guided Fuzzing engine. Requires clang 14 and llvm tools.
 
 ### Quick Start
 There are 2 errors in ``fuzz_target.c``, occurring after some 'if' statements depending on user input.
-The program will compile and run the target file with embedded instrumentation, and send mutated inputs based on the samples in ``./corpus/start`` to the executable's standard input.
+The program will compile and run the target file with embedded instrumentation, and send mutated inputs based on the samples in ``./input/corpus`` to the executable's standard input.
 The code coverage of each new input is monitored, and any inputs yielding new code coverage will be added to the corpus.
 
 ```bash
 cargo install ecfuzz
 git clone https://github.com/matt24smith/ecfuzz.git && cd ecfuzz
-ecfuzz --target fuzz_target.c --corpus ./corpus/start --dictionary-path input/sample.dict --seed 000 --iterations 5000
+ecfuzz --target fuzz_target.c --corpus ./input/corpus --dictionary-path input/sample.dict --seed 000 --iterations 5000
 ```
 
 Initializing the fuzzing engine with seed 000 finds both bugs in ``fuzz_target.c`` after ~4700 attempts.
@@ -63,6 +63,11 @@ https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/LLVM-14.0.
 - magic character replacement
 - dictionary insertion
 - tokenized dictionary replacement
+
+Try it out!
+```bash
+$ ecfuzz --help | tail -n+4 | ecfuzz --mutate-stdin --seed 1
+```
 
 
 #### Dictionary mutations

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::env::set_var;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::SystemTime;
 
 use serde::Deserialize;
@@ -41,31 +41,36 @@ Options:
 
   -s, --seed <seed>             Optionally seed the mutation engine with a given value
 
-  -, --mutate-stdin             The main event loop wont be run. Read data from
+  -, --mutate-stdin             The main won't be run. Instead, read data from
                                 stdin, and return mutated bytes to stdout. If
                                 used, the options below will be ignored.
 
-  -t, --target <fuzz_target.c>  Clang input file. Defaults to {}
+  -f, --mutate-file             If this flag is set, mutations will be written 
+                                to file ./input.mutated instead of sent via stdin
 
-  -x, --compiler                Compiler path. Defaults to {}
+  -t, --target <fuzz_target.c>  Clang input file. Defaults to '{}'
+  
+  -x, --compiler <path>         Compiler path. Defaults to '{}'
 
-  --llvm-profdata-path          Path to llvm-profdata. Defaults to {}
+  --llvm-profdata-path <path>   Path to llvm-profdata. Defaults to '{}'
 
-  --llvm-cov-path               Path to llvm-cov. Defaults to {}
+  --llvm-cov-path <path>        Path to llvm-cov. Defaults to '{}'
 
-  -i, --iterations              Total number of executions. Default {}
+  -i, --iterations <N>          Total number of executions. Default: {}
 
-  -c, --corpus                  Initial corpus file, entries separated by newlines.
-                                Defaults to ./corpus/start. May be repeated
+  -c, --corpus <file>           Initial corpus file, entries separated by newlines.
+                                Defaults to ./input/corpus. May be repeated
 
-  -C, --corpus-dir              Initialize corpus from a directory of files, one
+  -C, --corpus-dir <directory>  Initialize corpus from a directory of files, one
                                 entry per file. May be repeated for multiple directories
 
-  -o, --object                  Object file given to llvm-cov. Defaults to ./a.out.
+  -o, --object <path>           Object file given to llvm-cov. Defaults to '{}'.
                                 May be repeated for multiple files.
 
-  -O, --object-files            Object files given to llvm-cov. Can be specified
+  -O, --object-files <path1...> Object files given to llvm-cov. Can be specified
                                 as a list of object files or by shell expansion
+
+Pass additional args to the compiler with $CFLAGS
 "#,
         //  -m --mutation-rate            Frequency of mutations to inputs. Default 0.01
         header,
@@ -74,6 +79,7 @@ Options:
         defaults.llvm_profdata_path.as_os_str().to_str().unwrap(),
         defaults.llvm_cov_path.as_os_str().to_str().unwrap(),
         defaults.iterations,
+        defaults.objects[0].as_os_str().to_str().unwrap(),
     );
     help
 }
@@ -90,6 +96,7 @@ pub struct Config {
     pub seed_corpus: Vec<Vec<u8>>,
     pub seed: Vec<u8>,
     pub objects: Vec<PathBuf>,
+    pub mutate_file: bool,
 }
 
 pub struct Exec {
@@ -131,6 +138,7 @@ impl Config {
             seed: vec![],
             seed_corpus: vec![],
             objects: vec![PathBuf::from("a.out")],
+            mutate_file: false,
         }
     }
 
@@ -153,6 +161,10 @@ impl Config {
         if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
             println!("{}", help());
             std::process::exit(0);
+        }
+
+        if args.contains(&"-f".to_string()) || args.contains(&"--mutate-file".to_string()) {
+            cfg.mutate_file = true;
         }
 
         if args.contains(&"-d".to_string()) || args.contains(&"--dictionary-path".to_string()) {
@@ -289,15 +301,9 @@ impl Config {
             }
         }
 
-        /*
-        if cfg.objects.is_empty() {
-            cfg.objects.push(std::path::PathBuf::from("./a.out"));
-        }
-        */
-
         if cfg.seed_corpus.is_empty() {
-            cfg.seed_corpus = load_corpus(&PathBuf::from("./corpus/start"));
-            cfg.corpus_dir = PathBuf::from("./corpus");
+            cfg.seed_corpus = load_corpus(&PathBuf::from("./input/corpus"));
+            cfg.corpus_dir = PathBuf::from("./input");
         }
         Ok(cfg)
     }
@@ -329,13 +335,15 @@ impl Exec {
             panic!("Requires CC version 14 or higher. Found {}", cc_ver);
         }
 
-        let setup_args: &[String] = &[
+        let cflag_var = std::env::var("CFLAGS").unwrap_or_default();
+        println!("$CFLAGS={}", cflag_var);
+        let cflags = cflag_var.split(' ');
+
+        //let mut setup_args: &[String] = &[
+        let mut setup_args: Vec<String> = vec![
             (cfg.target_path.as_os_str().to_str().unwrap()),
-            //"-std=c17",
-            //"-pipe",
             "-o",
             "a.out",
-            "-O1",
             "-fprofile-instr-generate",
             "-fcoverage-mapping",
             // asan - very slow on windows and apple arm64
@@ -354,8 +362,16 @@ impl Exec {
             "-arch",
             #[cfg(target_arch = "aarch64")]
             "arm64",
+            "-std=c17",
+            "-O3",
         ]
-        .map(|s| s.to_string());
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        for flag in cflags {
+            setup_args.push(flag.to_string());
+        }
 
         println!(
             "compiling...\n{} {}\n",
@@ -365,12 +381,11 @@ impl Exec {
 
         let setup_result = Command::new(&cfg.cc_path).args(setup_args).output()?;
         if !setup_result.stderr.is_empty() {
-            eprintln!(
+            panic!(
                 "compile failed:\n{}\n{}",
                 String::from_utf8(setup_result.stdout)?,
                 String::from_utf8(setup_result.stderr)?,
             );
-            panic!();
         }
         assert!(setup_result.stderr == b"");
         println!("done compiling");
@@ -381,27 +396,64 @@ impl Exec {
 
 /// execute the target process with given inputs sent to stdin.
 /// returns true if the process stderr contains "Sanitizer"
-pub fn exec_target(raw_profile_filepath: &str, input: &[u8]) -> Result<bool, std::io::Error> {
+fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> Result<Output, std::io::Error> {
     set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
     let mut profile_target = Command::new("./a.out")
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+
     let _send_input = profile_target.stdin.take().unwrap();
     let mut send_input = BufWriter::new(_send_input);
+    assert!(input.len() < 65536);
     send_input.write_all(input)?;
-    send_input.write_all(b"\n")?;
     send_input.flush()?;
+    std::mem::drop(send_input);
     let result = profile_target.wait_with_output()?;
 
+    Ok(result)
+}
+
+fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> Result<Output, std::io::Error> {
+    let mut f = BufWriter::new(std::fs::File::create("input.mutation")?);
+    f.write_all(input)?;
+    f.flush()?;
+    std::mem::drop(f);
+
+    set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
+    let profile_target = Command::new("./a.out").stderr(Stdio::piped()).spawn()?;
+    let result = profile_target.wait_with_output()?;
+
+    Ok(result)
+}
+
+pub fn exec_target(
+    cfg: &Config,
+    raw_profile_filepath: &str,
+    input: &[u8],
+) -> Result<bool, std::io::Error> {
+    let result = if cfg.mutate_file {
+        exec_target_filein(raw_profile_filepath, input)
+    } else {
+        exec_target_stdin(raw_profile_filepath, input)
+    }?;
+
     if !result.stderr.is_empty() {
+        #[cfg(debug_assertions)]
+        let mut maxlen = 32;
+        #[cfg(debug_assertions)]
+        if input.len() < 32 {
+            maxlen = input.len();
+        }
+        #[cfg(debug_assertions)]
         eprintln!(
             "{}\ncrashing input: {}",
             String::from_utf8_lossy(&result.stderr),
-            String::from_utf8_lossy(input)
+            String::from_utf8_lossy(&input[0..maxlen])
         );
         return Ok(true);
     }
+
     Ok(false)
 }
 
