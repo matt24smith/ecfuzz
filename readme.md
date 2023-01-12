@@ -14,7 +14,7 @@ ecfuzz --target fuzz_target.c --corpus ./input/corpus --dictionary-path input/sa
 
 Initializing the fuzzing engine with seed 000 finds both bugs in ``fuzz_target.c`` after ~4700 attempts.
 Results will be deterministic as long as the corpus, dictionary, and seed remain unchanged.
-Mutations will be logged to the same directory as the ``start`` file.
+Mutations will be logged to the same directory as the ``corpus`` file.
 
 ```text
 ...
