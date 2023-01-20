@@ -1,25 +1,27 @@
 use std::collections::HashSet;
 use std::env::set_var;
+use std::ffi::OsString;
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::os::unix::ffi::OsStringExt;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::SystemTime;
 
 use serde::Deserialize;
 use serde_json::Value as jsonValue;
 
-use crate::corpus::{load_corpus, load_corpus_dir};
+use crate::corpus::CorpusInput;
 use crate::mutator::main as mutate_stdin;
+use crate::mutator::{byte_index, Mutation};
 
 fn help() -> String {
-    use crate::mutator::Mutation;
     let t = (SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap())
     .as_secs()
     .to_string();
     let defaults = Config::defaults();
-    let mut mutator = Mutation::with_seed(None, t.as_bytes().to_vec());
+    let mut mutator = Mutation::with_seed(None, t.as_bytes().to_vec(), None);
     mutator.data = defaults
         .target_path
         .as_os_str()
@@ -41,22 +43,24 @@ Options:
 
   -s, --seed <seed>             Optionally seed the mutation engine with a given value
 
-  -, --mutate-stdin             The main won't be run. Instead, read data from
+  -m, --multiplier <N>          Mutations per byte. Default 0.01
+
+   -, --mutate-stdin            The main loop won't be run. Instead, read data from
                                 stdin, and return mutated bytes to stdout. If
                                 used, the options below will be ignored.
 
-  -f, --mutate-file             If this flag is set, mutations will be written 
-                                to file ./input.mutated instead of sent via stdin
+  -f, --mutate-file             If this flag is set, mutations will be written
+                                to './input.mutation' instead of the target stdin
 
   -t, --target <fuzz_target.c>  Clang input file. Defaults to '{}'
-  
+
   -x, --compiler <path>         Compiler path. Defaults to '{}'
 
   --llvm-profdata-path <path>   Path to llvm-profdata. Defaults to '{}'
 
   --llvm-cov-path <path>        Path to llvm-cov. Defaults to '{}'
 
-  -i, --iterations <N>          Total number of executions. Default: {}
+  -i, --iterations <N>          Total number of executions. Default {}
 
   -c, --corpus <file>           Initial corpus file, entries separated by newlines.
                                 Defaults to ./input/corpus. May be repeated
@@ -70,9 +74,8 @@ Options:
   -O, --object-files <path1...> Object files given to llvm-cov. Can be specified
                                 as a list of object files or by shell expansion
 
-Pass additional args to the compiler with $CFLAGS
+Pass additional args to the compiler by setting $CFLAGS
 "#,
-        //  -m --mutation-rate            Frequency of mutations to inputs. Default 0.01
         header,
         defaults.target_path.as_os_str().to_str().unwrap(),
         defaults.cc_path.as_os_str().to_str().unwrap(),
@@ -86,17 +89,19 @@ Pass additional args to the compiler with $CFLAGS
 
 pub struct Config {
     pub cc_path: PathBuf,
-    pub corpus_dir: PathBuf,
     pub iter_check: usize,
     pub iterations: usize,
     pub llvm_cov_path: PathBuf,
     pub llvm_profdata_path: PathBuf,
     pub target_path: PathBuf,
     pub dict_path: Option<PathBuf>,
-    pub seed_corpus: Vec<Vec<u8>>,
+    pub corpus_files: Vec<PathBuf>,
+    pub corpus_dirs: Vec<PathBuf>,
     pub seed: Vec<u8>,
     pub objects: Vec<PathBuf>,
     pub mutate_file: bool,
+    pub mutate_args: bool,
+    pub multiplier: Option<f64>,
 }
 
 pub struct Exec {
@@ -106,7 +111,6 @@ pub struct Exec {
 impl Config {
     pub fn defaults() -> Self {
         Config {
-            corpus_dir: PathBuf::from("./corpus/"),
             iter_check: 100, // frequency of printed status updates
             iterations: 10000,
             target_path: PathBuf::from("./fuzz_target.c"),
@@ -134,21 +138,18 @@ impl Config {
             llvm_cov_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-cov.exe"),
 
             dict_path: None,
-            //seed: "000".as_bytes().to_vec(),
             seed: vec![],
-            seed_corpus: vec![],
+            corpus_files: vec![],
+            corpus_dirs: vec![],
             objects: vec![PathBuf::from("a.out")],
             mutate_file: false,
+            mutate_args: false,
+            multiplier: Some(0.01),
         }
     }
 
     /// parse command line options
     pub fn parse_args() -> Result<Self, Box<dyn std::error::Error>> {
-        if std::env::args().any(|x| x == *"--mutate-stdin" || x == *"-") {
-            mutate_stdin()?;
-            std::process::exit(0);
-        }
-
         let mut cfg: Config = Config::defaults();
 
         let mut args: Vec<String> = vec![];
@@ -158,6 +159,25 @@ impl Config {
             }
         }
 
+        // warn about extra arguments
+        let argstring = help().replace(',', " ");
+        let known_args: Vec<&str> = argstring
+            .split(' ')
+            .filter(|a| !a.is_empty() && a.starts_with('-'))
+            .collect();
+        for arg in args.iter().filter(|a| a.starts_with('-')) {
+            if !known_args.iter().any(|a| a.contains(arg)) {
+                eprintln!("\x1b[91mWarning\x1b[0m: unknown argument {}", arg);
+            }
+        }
+
+        // mutator mode
+        if std::env::args().any(|x| x == *"--mutate-stdin" || x == *"-") {
+            mutate_stdin()?;
+            std::process::exit(0);
+        }
+
+        // print help text
         if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
             println!("{}", help());
             std::process::exit(0);
@@ -237,6 +257,19 @@ impl Config {
                 }
             }
         }
+        if args.contains(&"-m".to_string()) || // #
+            args.contains(&"--multiplier".to_string())
+        {
+            let mut stop = false;
+            for arg in &args {
+                if arg == "-m" || arg == "--multiplier" {
+                    stop = true
+                } else if stop {
+                    cfg.multiplier = Some(arg.parse()?);
+                    break;
+                }
+            }
+        }
         if args.contains(&"-i".to_string()) || args.contains(&"--iterations".to_string()) {
             let mut stop = false;
             for arg in &args {
@@ -249,29 +282,29 @@ impl Config {
             }
         }
 
-        if args.contains(&"-c".to_string()) || args.contains(&"--corpus".to_string()) {
+        if args.contains(&r#"-c"#.to_string()) ||  // #
+            args.contains(&"--corpus".to_string())
+        {
             let mut stop = false;
             for arg in &args {
                 if arg == "-c" || arg == "--corpus" {
                     stop = true
                 } else if stop {
-                    cfg.seed_corpus
-                        .append(&mut load_corpus(&PathBuf::from(arg)));
-                    cfg.corpus_dir = PathBuf::from(Path::new(&arg).parent().unwrap());
+                    cfg.corpus_files.push(PathBuf::from(arg));
                     stop = false
                 }
             }
         }
 
-        if args.contains(&"-C".to_string()) || args.contains(&"--corpus-dir".to_string()) {
+        if args.contains(&"-C".to_string()) ||  // #
+            args.contains(&"--corpus-dir".to_string())
+        {
             let mut stop = false;
             for arg in &args {
                 if arg == "-C" || arg == "--corpus-dir" {
                     stop = true
                 } else if stop {
-                    cfg.seed_corpus
-                        .append(&mut load_corpus_dir(&PathBuf::from(arg))?);
-                    cfg.corpus_dir = PathBuf::from(Path::new(&arg).parent().unwrap());
+                    cfg.corpus_dirs.push(PathBuf::from(arg));
                     stop = false
                 }
             }
@@ -301,9 +334,8 @@ impl Config {
             }
         }
 
-        if cfg.seed_corpus.is_empty() {
-            cfg.seed_corpus = load_corpus(&PathBuf::from("./input/corpus"));
-            cfg.corpus_dir = PathBuf::from("./input");
+        if cfg.corpus_dirs.is_empty() && cfg.corpus_files.is_empty() {
+            cfg.corpus_files.push(PathBuf::from("./input/corpus"));
         }
         Ok(cfg)
     }
@@ -336,7 +368,7 @@ impl Exec {
         }
 
         let cflag_var = std::env::var("CFLAGS").unwrap_or_default();
-        println!("$CFLAGS={}", cflag_var);
+        println!("CFLAGS={:?}", cflag_var);
         let cflags = cflag_var.split(' ');
 
         //let mut setup_args: &[String] = &[
@@ -349,21 +381,18 @@ impl Exec {
             // asan - very slow on windows and apple arm64
             #[cfg(not(target_arch = "aarch64"))]
             #[cfg(not(target_os = "windows"))]
-            "-fsanitize=address",
-            // usan
-            "-fsanitize=undefined",
+            "-fsanitize=address,undefined",
             // msan - not supported on apple arm64
             // #[cfg(not(target_arch = "aarch64"))]
             //"-fsanitize=memory",
-            // stack trace
             "-fno-optimize-sibling-calls",
             "-fno-omit-frame-pointer",
             #[cfg(target_arch = "aarch64")]
             "-arch",
             #[cfg(target_arch = "aarch64")]
             "arm64",
-            "-std=c17",
-            "-O3",
+            //"-std=c17",
+            //"-O3",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -380,105 +409,151 @@ impl Exec {
         );
 
         let setup_result = Command::new(&cfg.cc_path).args(setup_args).output()?;
-        if !setup_result.stderr.is_empty() {
+        if !setup_result.stderr.is_empty()
+            && !byte_index(&b"error: ".to_vec(), &setup_result.stderr.to_vec()).is_empty()
+        {
             panic!(
                 "compile failed:\n{}\n{}",
                 String::from_utf8(setup_result.stdout)?,
                 String::from_utf8(setup_result.stderr)?,
             );
+        } else if !setup_result.stderr.is_empty() {
+            eprintln!(
+                "compiled with warnings:\n{}\n{}",
+                String::from_utf8(setup_result.stdout)?,
+                String::from_utf8(setup_result.stderr)?,
+            );
         }
-        assert!(setup_result.stderr == b"");
         println!("done compiling");
 
         Ok(())
+    }
+
+    pub fn trial(
+        cfg: &Config,
+        profraw: &str,
+        profdata: &str,
+        test_input: &Vec<u8>,
+        file_stem: PathBuf,
+        file_ext: PathBuf,
+        lifetime: u64,
+    ) -> (CorpusInput, ExecResult<Output>) {
+        let output = exec_target(cfg, profraw, test_input);
+        index_target_report(cfg, profraw, profdata).unwrap();
+        let result = CorpusInput {
+            data: test_input.to_owned(),
+            coverage: check_report_coverage(cfg, profdata).unwrap(),
+            file_ext,
+            file_stem,
+            lifetime: lifetime + 1,
+        };
+        (result, output)
+    }
+}
+
+pub enum ExecResult<Output> {
+    Ok(Output),
+    Err(Output),
+}
+
+fn exec_target(cfg: &Config, raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
+    if cfg.mutate_file {
+        exec_target_filein(raw_profile_filepath, input)
+    } else if cfg.mutate_args {
+        exec_target_args(raw_profile_filepath, input)
+    } else {
+        exec_target_stdin(raw_profile_filepath, input)
     }
 }
 
 /// execute the target process with given inputs sent to stdin.
 /// returns true if the process stderr contains "Sanitizer"
-fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> Result<Output, std::io::Error> {
+fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
     set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
     let mut profile_target = Command::new("./a.out")
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .unwrap();
 
-    let _send_input = profile_target.stdin.take().unwrap();
-    let mut send_input = BufWriter::new(_send_input);
-    assert!(input.len() < 65536);
-    send_input.write_all(input)?;
-    send_input.flush()?;
+    let send_input = profile_target.stdin.take().unwrap();
+    let mut send_input = BufWriter::new(send_input);
+
+    let mut result = send_input.write_all(input);
+    if result.is_ok() {
+        result = send_input.flush();
+    }
+
     std::mem::drop(send_input);
-    let result = profile_target.wait_with_output()?;
 
-    Ok(result)
+    let output = profile_target.wait_with_output().unwrap();
+
+    if result.is_ok() && output.stderr.is_empty() {
+        ExecResult::Ok(output)
+    } else {
+        ExecResult::Err(output)
+    }
 }
 
-fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> Result<Output, std::io::Error> {
-    let mut f = BufWriter::new(std::fs::File::create("input.mutation")?);
-    f.write_all(input)?;
-    f.flush()?;
+fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
+    let mut f = BufWriter::new(std::fs::File::create("input.mutation").unwrap());
+    f.write_all(input).unwrap();
+
     std::mem::drop(f);
 
     set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
-    let profile_target = Command::new("./a.out").stderr(Stdio::piped()).spawn()?;
-    let result = profile_target.wait_with_output()?;
+    let profile_target = Command::new("./a.out")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let result = profile_target.wait_with_output();
 
-    Ok(result)
-}
-
-pub fn exec_target(
-    cfg: &Config,
-    raw_profile_filepath: &str,
-    input: &[u8],
-) -> Result<bool, std::io::Error> {
-    let result = if cfg.mutate_file {
-        exec_target_filein(raw_profile_filepath, input)
+    if let Ok(res) = result {
+        ExecResult::Ok(res)
     } else {
-        exec_target_stdin(raw_profile_filepath, input)
-    }?;
-
-    if !result.stderr.is_empty() {
-        #[cfg(debug_assertions)]
-        let mut maxlen = 32;
-        #[cfg(debug_assertions)]
-        if input.len() < 32 {
-            maxlen = input.len();
-        }
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "{}\ncrashing input: {}",
-            String::from_utf8_lossy(&result.stderr),
-            String::from_utf8_lossy(&input[0..maxlen])
-        );
-        return Ok(true);
+        ExecResult::Err(result.unwrap())
     }
-
-    Ok(false)
 }
 
 pub fn exec_target_args(
     raw_profile_filepath: &str,
-    cmd_args: &[String; 6],
-) -> Result<bool, std::io::Error> {
+    //cmd_args: &[String; 6],
+    input: &[u8],
+) -> ExecResult<Output> {
     set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
 
-    let profile_target = Command::new("./a.out")
-        .args(cmd_args)
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let result = profile_target.wait_with_output()?;
-
-    if !result.stderr.is_empty() {
-        eprintln!(
-            "{}\ncrashing input: {:?}",
-            String::from_utf8_lossy(&result.stderr),
-            //String::from_utf8_lossy(input),
-            cmd_args
-        );
-        return Ok(true);
+    //let cmd_args = String::from_utf8_lossy(input.clone());
+    let mut args: Vec<Vec<u8>> = vec![];
+    let mut cursor: Vec<u8> = Vec::new();
+    for b in input {
+        if b == &b'\0' {
+            args.push(cursor);
+            cursor = Vec::new();
+        } else {
+            cursor.push(*b);
+        }
     }
-    Ok(false)
+    if !cursor.is_empty() {
+        args.push(cursor);
+    }
+    let os_args: Vec<OsString> = args
+        .iter()
+        .map(|a| OsStringExt::from_vec(a.to_vec()))
+        .collect();
+
+    let profile_target = Command::new("./a.out")
+        .args(os_args)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let output = profile_target.wait_with_output();
+
+    if let Ok(out) = output {
+        ExecResult::Ok(out)
+    } else {
+        ExecResult::Err(output.unwrap())
+    }
 }
 
 /// convert raw profile data to an indexed file format
@@ -490,6 +565,7 @@ pub fn index_target_report(
     let prof_merge_args = &[
         "merge".to_string(),
         "-sparse".to_string(),
+        //"--instr".to_string(),
         raw_profile_filepath.to_string(),
         "-o".to_string(),
         profile_filepath.to_string(),
@@ -508,16 +584,10 @@ fn read_report(
     cfg: &Config,
     profile_filepath: &str,
 ) -> Result<ReportFile, Box<dyn std::error::Error>> {
-    let mut prof_report_args: Vec<String> = vec![
-        "export",
-        "--instr-profile",
-        profile_filepath,
-        //"--object",
-        //"./a.out",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut prof_report_args: Vec<String> = vec!["export", "--instr-profile", profile_filepath]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     #[cfg(debug_assertions)]
     assert!(!cfg.objects.is_empty());
@@ -558,7 +628,6 @@ pub fn check_report_coverage(
         //for file in report.functions {
         for branch in file.branches {
             //for branch in file.regions {
-            assert!(branch[4] <= 1);
             if branch[4] > 0 {
                 coverageset.insert(i);
             }
