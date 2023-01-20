@@ -26,8 +26,6 @@ use std::path::PathBuf;
 
 use xxhash_rust::xxh3::Xxh3;
 
-const MUTATIONS: f64 = 0.01;
-
 const HELP: &str = r#"
 Mutate input from stdin, and return the result to stdout
 
@@ -52,6 +50,7 @@ pub struct Mutation {
     hasher: Xxh3,
     hash_seed: [u8; 4],
     mutators: Vec<for<'r> fn(&'r mut Mutation)>,
+    multiplier: f64,
 }
 
 /// Magic values consist of a tuple with byte size and a bytestring.
@@ -64,7 +63,7 @@ enum Magic {
 }
 
 /// find all indices of matching substring in a raw binary vector
-fn byte_index(key: &Vec<u8>, bytes: &Vec<u8>) -> Vec<usize> {
+pub fn byte_index(key: &Vec<u8>, bytes: &Vec<u8>) -> Vec<usize> {
     assert!(key.len() <= bytes.len());
 
     let mut indices: Vec<usize> = vec![];
@@ -126,7 +125,7 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
 
 impl Mutation {
     /// new mutation engine
-    pub fn new(dict_path: Option<PathBuf>) -> Self {
+    pub fn new(dict_path: Option<PathBuf>, multiplier: Option<f64>) -> Self {
         let mut mutators = [
             Mutation::mutate_magic,
             Mutation::mutate_bits,
@@ -160,12 +159,13 @@ impl Mutation {
                 hasher: Xxh3::with_seed(0),
                 hash_seed: [0x0_u8, 0x0_u8, 0x0_u8, 0x0_u8],
                 mutators,
+                multiplier: multiplier.unwrap_or(0.01),
             }
         }
     }
 
-    pub fn with_seed(path: Option<PathBuf>, seed: Vec<u8>) -> Self {
-        let mut m = Mutation::new(path);
+    pub fn with_seed(path: Option<PathBuf>, seed: Vec<u8>, multiplier: Option<f64>) -> Self {
+        let mut m = Mutation::new(path, multiplier);
         let _ = &m.hasher.write(&seed);
         m
     }
@@ -210,7 +210,8 @@ impl Mutation {
     /// magic number mutation
     /// splices data with random magic value
     pub fn mutate_magic(&mut self) {
-        let mut count = (self.data.len() as f64 * MUTATIONS) as usize;
+        //let mut count = (self.data.len() as f64 * self.multiplier) as usize;
+        let mut count = (self.data.len() as f64 * 10000.0 / (10000.0 / self.multiplier)) as usize;
 
         if count == 0 {
             count = 1;
@@ -237,7 +238,7 @@ impl Mutation {
 
     /// XOR mutation and bitshift
     pub fn mutate_bits(&mut self) {
-        let mut count = (self.data.len() as f64 * 8.0 * MUTATIONS) as usize;
+        let mut count = (self.data.len() as f64 * 8.0 * self.multiplier) as usize;
 
         if count == 0 {
             count = 1;
@@ -260,7 +261,7 @@ impl Mutation {
 
     /// replace randomly selected bytes with random data of equivalent length
     pub fn mutate_bytes(&mut self) {
-        let mut count = (self.data.len() as f64 * MUTATIONS) as usize;
+        let mut count = (self.data.len() as f64 * self.multiplier) as usize;
 
         if count == 0 {
             count = 1;
@@ -362,6 +363,18 @@ pub fn main() -> Result<(), std::io::Error> {
             }
         }
     }
+    let mut multiplier: Option<f64> = None;
+    if args.contains(&"-m".to_string()) || args.contains(&"--multiplier".to_string()) {
+        let mut stop = false;
+        for arg in &args {
+            if arg == "-m" || arg == "--multiplier" {
+                stop = true
+            } else if stop {
+                multiplier = Some(arg.parse().unwrap());
+                break;
+            }
+        }
+    }
 
     // read input from stdin
     let stdin = io::stdin();
@@ -383,7 +396,7 @@ pub fn main() -> Result<(), std::io::Error> {
         }
     }
 
-    let mut mutation = Mutation::with_seed(dictpath, seed);
+    let mut mutation = Mutation::with_seed(dictpath, seed, multiplier);
     mutation.data = input;
     mutation.mutate();
     let _w = writer.write(&mutation.data).unwrap();
@@ -407,7 +420,7 @@ mod tests {
     fn test_mutations() {
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
 
-        let mut mutation = Mutation::new(None);
+        let mut mutation = Mutation::new(None, None);
         mutation.data = test;
 
         mutation.mutate_magic();
@@ -456,7 +469,7 @@ mod tests {
     #[test]
     fn test_dict() {
         let dictpath = PathBuf::from("tests/sample.dict");
-        let mut mutation = Mutation::new(Some(dictpath));
+        let mut mutation = Mutation::new(Some(dictpath), None);
 
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
         mutation.data = test.clone();
