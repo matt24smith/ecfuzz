@@ -17,6 +17,6 @@ sample*.json
 **json
 output
 **a.out
-input/build.rs
-input/*.corpus
-input/*.coverage
+input/*
+input/**
+!input/sample.dict
