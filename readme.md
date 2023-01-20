@@ -9,6 +9,7 @@ The code coverage of each new input is monitored, and any inputs yielding new co
 ```bash
 cargo install ecfuzz
 git clone https://github.com/matt24smith/ecfuzz.git && cd ecfuzz
+export CFLAGS="-std=c17 -g -fcolor-diagnostics -O3"
 ecfuzz --target fuzz_target.c --corpus ./input/corpus --dictionary-path input/sample.dict --seed 000 --iterations 5000
 ```
 
@@ -24,10 +25,23 @@ fuzz_target.c:12:15: runtime error: applying zero offset to null pointer
 SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior fuzz_target.c:12:15 in 
 fuzz_target.c:12:15: runtime error: store to null pointer of type 'char'
 SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior fuzz_target.c:12:15 in
-AddressSanitizer:DEADLYSIGNAL
-...
 
-SUMMARY: AddressSanitizer: SEGV (/usr/lib/libc.so.6+0x73ba2) (BuildId: 1e94beb079e278ac4f2c8bce1f53091548ea1584) in fwrite
+  This frame has 1 object(s):
+    [32, 288) 'str1' <== Memory access at offset 32 is inside this variable
+
+SUMMARY: AddressSanitizer: unknown-crash (/home/matt/ecfuzz/a.out+0x11a322) (BuildId: d47f3011239226931362fe3a8999c8bc129a9a52) in do_comparison
+Shadow bytes around the buggy address:
+  0x10005a40c570: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10005a40c580: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x10005a40c590: f1 f1 f1 f1[00]00 00 00 00 00 00 00 00 00 00 00
+  0x10005a40c5a0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10005a40c5b0: 00 00 00 00 f3 f3 f3 f3 f3 f3 f3 f3 00 00 00 00
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:             00 
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+...
 crashing input: ABCDEF000000000
 ```
 
@@ -66,7 +80,7 @@ https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/LLVM-14.0.
 
 Try it out!
 ```bash
-$ ecfuzz --help | tail -n+4 | ecfuzz --mutate-stdin --seed 1
+ecfuzz --help | tail -n+4 | ecfuzz --mutate-stdin --seed 1
 ```
 
 
