@@ -1,3 +1,5 @@
+![ECFuzz](/examples/ecfuzz.png)
+
 ## ECFuzz
 Evolutionary Coverage-guided Fuzzing engine. Requires clang 14 and llvm tools.
 
