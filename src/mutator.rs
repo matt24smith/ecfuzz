@@ -35,7 +35,10 @@ Options:
                                 dictionary value insertion, and tokenized
                                 dictionary replacement
 
-  -s, --seed <seed>             Optionally seed the mutation
+  -s, --seed <seed>             Optionally seed the mutation engine with a given value
+
+  -m, --multiplier <N>          Mutations per byte. Default 0.01
+
 
 Example:
 
