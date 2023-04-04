@@ -201,7 +201,6 @@ impl MyFuzzEngine {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sets clang compiler and llvm tools paths to default settings
-    // caution: default paths not yet defined for windows
     let mut cfg = Config::defaults();
     cfg.iter_check = 8;
     cfg.target_path = PathBuf::from("./examples/example.c");
