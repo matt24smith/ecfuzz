@@ -2,7 +2,12 @@ use std::collections::HashSet;
 use std::env::set_var;
 use std::ffi::OsString;
 use std::io::{BufWriter, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::SystemTime;
@@ -523,22 +528,35 @@ pub fn exec_target_args(
     set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
 
     //let cmd_args = String::from_utf8_lossy(input.clone());
+    #[cfg(not(target_os = "windows"))]
     let mut args: Vec<Vec<u8>> = vec![];
+    #[cfg(target_os = "windows")]
+    let mut args: Vec<Vec<u16>> = vec![];
+
+    #[cfg(not(target_os = "windows"))]
     let mut cursor: Vec<u8> = Vec::new();
+    #[cfg(target_os = "windows")]
+    let mut cursor: Vec<u16> = Vec::new();
     for b in input {
         if b == &b'\0' {
             args.push(cursor);
             cursor = Vec::new();
         } else {
-            cursor.push(*b);
+            cursor.push((*b).into());
         }
     }
     if !cursor.is_empty() {
         args.push(cursor);
     }
+    #[cfg(not(target_os = "windows"))]
     let os_args: Vec<OsString> = args
         .iter()
         .map(|a| OsStringExt::from_vec(a.to_vec()))
+        .collect();
+    #[cfg(target_os = "windows")]
+    let os_args: Vec<OsString> = args
+        .iter()
+        .map(|a| OsStringExt::from_wide(a))
         .collect();
 
     let profile_target = Command::new("./a.out")
