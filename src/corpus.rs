@@ -205,7 +205,7 @@ impl std::fmt::Debug for CorpusInput {
             .field("stem", &self.file_stem)
             .field("coverage", &self.coverage)
             .field("lifetime", &self.lifetime)
-            .field("data", &String::from_utf8_lossy(&self.data[0..maxlen]))
+            .field("preview", &String::from_utf8_lossy(&self.data[0..maxlen]))
             .finish()
     }
 }

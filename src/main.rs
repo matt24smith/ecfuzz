@@ -55,7 +55,8 @@ pub fn _main_loop(
                     corpus_entry.serialize(&outdir).unwrap();
                     cov_corpus.add_and_distill_corpus(corpus_entry.clone());
                     println!(
-                        "\n\x1b[32mNew coverage hit!\x1b[0m updating inputs... {}",
+                        "\n\x1b[32mNew coverage hit!\x1b[0m execs: {}\tupdating inputs... {}",
+                        i,
                         cov_corpus
                     );
                 } else {
@@ -74,8 +75,9 @@ pub fn _main_loop(
                 ) {
                     crash_corpus.add_and_distill_corpus(corpus_entry);
                     eprintln!(
-                        "\n{}\x1b[31mNew crash!\x1b[0m crash log:{}",
+                        "\n{}\x1b[31mNew crash!\x1b[0m execs: {}\tcrash log:{}",
                         String::from_utf8_lossy(&output.stderr),
+                        i,
                         &crash_corpus
                     );
                 } else {
@@ -83,8 +85,9 @@ pub fn _main_loop(
                     remove_file(&profraw).expect("removing raw profile data");
                     remove_file(&profdata).expect("removing coverage profile data");
                     eprintln!(
-                        "\n{}\x1b[91mKnown crash!\x1b[0m {}",
+                        "\n{}\x1b[91mKnown crash!\x1b[0m execs: {}\t{}",
                         String::from_utf8_lossy(&output.stderr),
+                        i,
                         crash_corpus
                     );
                     if corpus_entry.coverage.is_empty() {

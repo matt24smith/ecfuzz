@@ -15,14 +15,13 @@ export CFLAGS="-std=c17 -g -fcolor-diagnostics -O3"
 ecfuzz --target fuzz_target.c --corpus ./input/corpus --dictionary-path input/sample.dict --seed 000 --iterations 5000
 ```
 
-Initializing the fuzzing engine with seed 000 finds both bugs in ``fuzz_target.c`` after ~4700 attempts.
+Initializing the fuzzing engine with seed ``000`` finds both bugs in ``fuzz_target.c`` after 4628 attempts.
 Results will be deterministic as long as the corpus, dictionary, and seed remain unchanged.
 Mutations will be logged to the same directory as the ``corpus`` file.
 
 ```text
 ...
 branch hits: 10/12  exec/s: 63.21  inputs: 2  i: 4600  ABCDE0001000000
-crashing path A...
 fuzz_target.c:12:15: runtime error: applying zero offset to null pointer       
 SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior fuzz_target.c:12:15 in 
 fuzz_target.c:12:15: runtime error: store to null pointer of type 'char'
@@ -44,7 +43,11 @@ Shadow byte legend (one shadow byte represents 8 application bytes):
   Stack mid redzone:       f2
   Stack right redzone:     f3
 ...
-crashing input: ABCDEF000000000
+crashing path A...
+New crash! execs: 4628  crash log:
+  Corpus { inputs: [
+    CorpusInput:  { stem: "corpus", coverage: {}, lifetime: 7, preview: "ABCDEF\r00000000\r" }],
+  Total coverage: {} }
 ```
 
 
