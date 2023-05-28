@@ -376,7 +376,6 @@ impl Exec {
         println!("CFLAGS={:?}", cflag_var);
         let cflags = cflag_var.split(' ');
 
-        //let mut setup_args: &[String] = &[
         let mut setup_args: Vec<String> = vec![
             (cfg.target_path.as_os_str().to_str().unwrap()),
             "-o",
@@ -387,6 +386,9 @@ impl Exec {
             #[cfg(not(target_arch = "aarch64"))]
             #[cfg(not(target_os = "windows"))]
             "-fsanitize=address,undefined",
+            // msan doesn't work at the same time as usan on windows
+            #[cfg(target_os = "windows")]
+            "-fsanitize=undefined",
             // msan - not supported on apple arm64
             // #[cfg(not(target_arch = "aarch64"))]
             //"-fsanitize=memory",
@@ -396,8 +398,6 @@ impl Exec {
             "-arch",
             #[cfg(target_arch = "aarch64")]
             "arm64",
-            //"-std=c17",
-            //"-O3",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -542,7 +542,7 @@ pub fn exec_target_args(
             args.push(cursor);
             cursor = Vec::new();
         } else {
-            cursor.push((*b).into());
+            cursor.push(*b);
         }
     }
     if !cursor.is_empty() {
@@ -554,10 +554,7 @@ pub fn exec_target_args(
         .map(|a| OsStringExt::from_vec(a.to_vec()))
         .collect();
     #[cfg(target_os = "windows")]
-    let os_args: Vec<OsString> = args
-        .iter()
-        .map(|a| OsStringExt::from_wide(a))
-        .collect();
+    let os_args: Vec<OsString> = args.iter().map(|a| OsStringExt::from_wide(a)).collect();
 
     let profile_target = Command::new("./a.out")
         .args(os_args)

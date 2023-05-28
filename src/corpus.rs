@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::fs::{read, read_dir, File};
+use std::fs::{create_dir, read, read_dir, File};
 use std::io::Write;
 use std::iter::zip;
 use std::path::{Path, PathBuf};
@@ -86,12 +86,16 @@ impl Corpus {
     }
 
     /// load a corpus of inputs from a single file, separated by newlines
-    pub fn load_corpus_file(corpus_path: &PathBuf) -> (Vec<Vec<u8>>, Vec<PathBuf>) {
+    pub fn load_corpus_file(
+        corpus_path: &PathBuf,
+    ) -> std::io::Result<(Vec<Vec<u8>>, Vec<PathBuf>)> {
         assert!(!corpus_path.is_dir());
 
         fn new_fpath(corpus_path: &Path) -> PathBuf {
             let output_dir = PathBuf::from("output");
-            assert!(output_dir.is_dir());
+            if !output_dir.is_dir() {
+                create_dir(output_dir.clone()).expect("creating output directory");
+            };
             let basename = corpus_path.file_stem().unwrap().to_str().unwrap();
             output_dir.join(Path::new(&basename))
         }
@@ -104,10 +108,10 @@ impl Corpus {
             .collect::<Vec<Vec<u8>>>();
 
         let names: Vec<PathBuf> = (0..inputs.len()).map(|_i| new_fpath(corpus_path)).collect();
-        (inputs, names)
+        Ok((inputs, names))
     }
     /// load a corpus of input files from a directory path
-    pub fn load_corpus_dir(corpus_dir: &PathBuf) -> (Vec<Vec<u8>>, Vec<PathBuf>) {
+    pub fn load_corpus_dir(corpus_dir: &PathBuf) -> std::io::Result<(Vec<Vec<u8>>, Vec<PathBuf>)> {
         let filepaths: Vec<PathBuf> = read_dir(corpus_dir)
             .unwrap()
             .map(|f| f.unwrap().path())
@@ -145,17 +149,22 @@ impl Corpus {
             o.set_extension(f.extension().unwrap_or_default());
         }
 
-        (files, outfiles)
+        Ok((files, outfiles))
     }
 
     /// load the corpus from a newline-separated file, or directory of files
-    pub fn load(&mut self, cfg: &Config, corpus_path: &PathBuf, is_dir: bool) {
+    pub fn load(
+        &mut self,
+        cfg: &Config,
+        corpus_path: &PathBuf,
+        is_dir: bool,
+    ) -> std::io::Result<()> {
         let profraw = &format!("output/{}.profraw", std::process::id());
         let profdata = &format!("output/{}.profdata", std::process::id());
         let (inputs, filenames) = if is_dir {
-            Corpus::load_corpus_dir(corpus_path)
+            Corpus::load_corpus_dir(corpus_path)?
         } else {
-            Corpus::load_corpus_file(corpus_path)
+            Corpus::load_corpus_file(corpus_path)?
         };
         for (input, filename) in zip(inputs, filenames) {
             let (input, _crashed) = Exec::trial(
@@ -179,6 +188,7 @@ impl Corpus {
                 lifetime: 0,
             });
         }
+        Ok(())
     }
 
     /// append corpus entries to the corpus file.
@@ -257,8 +267,16 @@ mod tests {
     fn test_load_corpus() {
         let cfg = Config::defaults();
         let mut corpus = Corpus::new();
-        corpus.load(&cfg, &PathBuf::from("input/corpus"), false);
-        corpus.load(&cfg, &PathBuf::from("input/sample.dict"), false);
+        corpus
+            .load(&cfg, &PathBuf::from("examples/cli/input/corpus"), false)
+            .unwrap();
+        corpus
+            .load(
+                &cfg,
+                &PathBuf::from("examples/cli/input/sample.dict"),
+                false,
+            )
+            .unwrap();
         assert!(!corpus.inputs.is_empty());
     }
 
@@ -266,7 +284,7 @@ mod tests {
     fn test_load_corpus_dir() {
         let cfg = Config::defaults();
         let mut corpus = Corpus::new();
-        corpus.load(&cfg, &PathBuf::from("./tests/"), true);
+        corpus.load(&cfg, &PathBuf::from("./tests/"), true).unwrap();
         //corpus.load(&cfg, &PathBuf::from("./input/testing/"), true);
         assert!(!corpus.inputs.is_empty());
     }

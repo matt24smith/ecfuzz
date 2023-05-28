@@ -20,5 +20,3 @@ output.txt
 profdata
 profraw
 sample*.json
-!input/sample.dict
-

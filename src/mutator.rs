@@ -228,7 +228,7 @@ impl Mutation {
             if n_size > self.data.len() {
                 n_size = self.data.len();
             }
-            let mut sz = self.data.len() as usize - n_size as usize;
+            let mut sz: usize = self.data.len() - n_size;
             if sz == 0 {
                 sz = 1
             }
@@ -256,8 +256,8 @@ impl Mutation {
 
         for _ in 0..count {
             let bit = self.hashfunc() % (maxidx * 8);
-            let idx_bit: usize = (bit % 8) as usize;
-            let idx_byte: usize = (bit / 8) as usize;
+            let idx_bit: usize = bit % 8;
+            let idx_byte: usize = bit / 8;
             self.data[idx_byte] ^= 1 << idx_bit;
         }
     }
@@ -269,7 +269,7 @@ impl Mutation {
         if count == 0 {
             count = 1;
         };
-        let maxidx = self.data.len() as usize;
+        let maxidx: usize = self.data.len();
 
         #[cfg(debug_assertions)]
         assert!(count > 0);
