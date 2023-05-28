@@ -103,8 +103,16 @@ impl MyFuzzEngine {
         let multiplier = Some(0.01);
         let dict_path: Option<PathBuf> = None;
 
-        let firstnames = Corpus::load_corpus_file(&PathBuf::from("examples/firstname.dict")).0;
-        let lastnames = Corpus::load_corpus_file(&PathBuf::from("examples/lastname.dict")).0;
+        let firstnames = Corpus::load_corpus_file(&PathBuf::from(
+            "examples/lib_custom_fuzzer/input/firstname.dict",
+        ))
+        .expect("loading firstname dict")
+        .0;
+        let lastnames = Corpus::load_corpus_file(&PathBuf::from(
+            "examples/lib_custom_fuzzer/input/lastname.dict",
+        ))
+        .expect("loading lastname dict")
+        .0;
 
         MyFuzzEngine {
             mutation_engine: Mutation::new(dict_path, multiplier),
@@ -203,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sets clang compiler and llvm tools paths to default settings
     let mut cfg = Config::defaults();
     cfg.iter_check = 8;
-    cfg.target_path = PathBuf::from("./examples/example.c");
+    cfg.target_path = PathBuf::from("./examples/lib_custom_fuzzer/example.c");
     cfg.iterations = 10_000;
     cfg.objects = vec![PathBuf::from("./a.out")];
     cfg.mutate_args = true;
@@ -299,8 +307,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // save the results
-    cov_corpus.save(PathBuf::from("output/example1/"))?;
-    crash_corpus.save(PathBuf::from("output/example1_crash/"))?;
+    cov_corpus.save(PathBuf::from("examples/lib_custom_fuzzer/output/corpus/"))?;
+    crash_corpus.save(PathBuf::from("examples/lib_custom_fuzzer/output/crashes/"))?;
 
     Ok(())
 }
