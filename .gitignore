@@ -2,7 +2,6 @@
 **json
 **profdata
 **profraw
-/target
 a.exp
 a.lib
 a.out
@@ -15,8 +14,9 @@ init.profdata
 init.profraw
 input/*
 input/**
-output
+/output
 output.txt
 profdata
 profraw
 sample*.json
+target
