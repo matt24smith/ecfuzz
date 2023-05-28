@@ -1,4 +1,4 @@
-<img style="display: block; margin-left: auto; margin-right: auto;" src="/examples/ecfuzz.png" alt="ECFuzz"></img>
+<img style="display: block; margin-left: auto; margin-right: auto;" src="/examples/animate_logo/output/ecfuzz.gif" alt="ECFuzz"></img>
 
 ## ECFuzz
 Evolutionary Coverage-guided Fuzzing engine. Requires clang 14 and llvm tools.
