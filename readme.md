@@ -8,7 +8,7 @@ Evolutionary Coverage-guided Fuzzing engine. Provides a fuzzing engine library a
 Install clang and llvm tools with your preferred package manager.
 
 Windows users can download clang+LLVM here: 
-https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/LLVM-14.0.6-win64.exe
+<https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/LLVM-14.0.6-win64.exe>
 
 Run ECFuzz with the command line interface. 
 Use the ``--mutate-stdin`` flag to generate a single mutation from standard input without measuring code coverage. 
