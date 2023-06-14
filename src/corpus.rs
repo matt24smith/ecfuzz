@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::execute::{check_report_coverage, index_target_report, Config, Exec};
 
+/// each test input sent to the target program contains the byte vector
+/// to be tested, as well as the resulting branch coverage set and some metadata
 #[derive(Clone)]
 pub struct CorpusInput {
     pub data: Vec<u8>,
@@ -15,17 +17,21 @@ pub struct CorpusInput {
     pub lifetime: u64,
 }
 
+/// corpus contains a vector of corpus inputs, and the total branch coverage set
 pub struct Corpus {
     pub inputs: Vec<CorpusInput>,
     pub total_coverage: HashSet<u64>,
 }
 
 impl CorpusInput {
+    /// get the filename for a test input file
     pub fn get_filename(&self) -> PathBuf {
         let mut p = PathBuf::from(self.file_stem.to_str().unwrap());
         p.set_extension(self.file_ext.clone());
         p
     }
+
+    /// serialize the test input to an input file
     pub fn serialize(&self, output_dir: &Path) -> Result<(), std::io::Error> {
         let mut hits = self.coverage.clone().drain().collect::<Vec<u64>>();
         hits.sort();

@@ -113,7 +113,10 @@ pub struct Exec {
     pub cfg: Config,
 }
 
+/// target executor configurations: clang executable path, set CFLAGS variable,
+/// max number of executions, etc.
 impl Config {
+    /// initialize target execution config with default values
     pub fn defaults() -> Self {
         Config {
             iter_check: 100, // frequency of printed status updates
@@ -434,6 +437,8 @@ impl Exec {
         Ok(())
     }
 
+    /// execute the target program with a new test input.
+    /// record the profiled data to profraw, and index report to profdata
     pub fn trial(
         cfg: &Config,
         profraw: &str,
@@ -461,6 +466,9 @@ pub enum ExecResult<Output> {
     Err(Output),
 }
 
+/// execute the target program with a new test input either via an input file,
+/// command line arguments, or by sending to the target stdin, as defined in
+/// Config
 fn exec_target(cfg: &Config, raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
     if cfg.mutate_file {
         exec_target_filein(raw_profile_filepath, input)
@@ -471,8 +479,7 @@ fn exec_target(cfg: &Config, raw_profile_filepath: &str, input: &[u8]) -> ExecRe
     }
 }
 
-/// execute the target process with given inputs sent to stdin.
-/// returns true if the process stderr contains "Sanitizer"
+/// execute the target program with test input sent to stdin
 fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
     set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
     let mut profile_target = Command::new("./a.out")
@@ -500,6 +507,7 @@ fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Out
     }
 }
 
+/// execute the target program with test input sent via an input file
 fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
     let mut f = BufWriter::new(std::fs::File::create("input.mutation").unwrap());
     f.write_all(input).unwrap();
@@ -520,6 +528,7 @@ fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Ou
     }
 }
 
+/// execute the target program with test input sent via program arguments
 pub fn exec_target_args(
     raw_profile_filepath: &str,
     //cmd_args: &[String; 6],

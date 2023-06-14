@@ -47,6 +47,11 @@ Example:
 
 "#;
 
+/// Mutation engine.
+/// input to be mutated is stored in data.
+/// If a dictionary map is given, dict keys will be inserted if the values
+/// are empty, otherwise values will be used for tokenized key replacement.
+/// Can be iinitialized with a different hashing seed and multiplier
 pub struct Mutation {
     pub data: Vec<u8>,
     pub dict: Option<BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
@@ -65,6 +70,19 @@ enum Magic {
     C((u8, [u8; 4])),
 }
 
+const MAGIC_VALUES: &'static [&'static Magic; 10] = &[
+    &Magic::A((1, *b"\xff")),
+    &Magic::A((1, *b"\x7f")),
+    &Magic::A((1, *b"\x00")),
+    &Magic::B((2, *b"\xff\xff")),
+    &Magic::B((2, *b"\x00\x00")),
+    &Magic::C((4, *b"\xff\xff\xff\xff")),
+    &Magic::C((4, *b"\x00\x00\x00\x00")),
+    &Magic::C((4, *b"\x00\x00\x00\x40")),
+    &Magic::C((4, *b"\x00\x00\x00\x80")),
+    &Magic::C((4, *b"\xff\xff\xff\x7f")),
+];
+
 /// find all indices of matching substring in a raw binary vector
 pub fn byte_index(key: &Vec<u8>, bytes: &Vec<u8>) -> Vec<usize> {
     assert!(key.len() <= bytes.len());
@@ -79,6 +97,10 @@ pub fn byte_index(key: &Vec<u8>, bytes: &Vec<u8>) -> Vec<usize> {
     indices
 }
 
+/// Load a fuzzing dictionary from a file.
+/// dictionary entries are defined one per line: either as a single "key" or as
+/// "key=value" pair. Each key may be defined multiple times.
+/// Returns a byte vector map.
 pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
     let mut dict: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
 
@@ -127,7 +149,10 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
 }
 
 impl Mutation {
-    /// new mutation engine
+    /// Initialize Mutation engine with an empty seed value.
+    /// Multiplier specifies mutations per byte, some float ranging from 0 to 1.
+    /// If multiplier is None, a value of 0.01 will be used for one mutation
+    /// per 100 bytes
     pub fn new(dict_path: Option<PathBuf>, multiplier: Option<f64>) -> Self {
         let mut mutators = [
             Mutation::mutate_magic,
@@ -167,6 +192,10 @@ impl Mutation {
         }
     }
 
+    /// initialize new Mutation seeded by a string of bytes.
+    /// Multiplier specifies mutations per byte, a float ranging from 0 to 1.
+    /// If multiplier is None, a value of 0.01 will be used for one mutation
+    /// per 100 bytes
     pub fn with_seed(path: Option<PathBuf>, seed: Vec<u8>, multiplier: Option<f64>) -> Self {
         let mut m = Mutation::new(path, multiplier);
         let _ = &m.hasher.write(&seed);
@@ -190,20 +219,7 @@ impl Mutation {
     /// Magic values.
     /// Each tuple consists of a byte length, and a bytestring of matching length
     fn magic_char(&mut self) -> (usize, Vec<u8>) {
-        let nums: Vec<Magic> = vec![
-            Magic::A((1, *b"\xff")),
-            Magic::A((1, *b"\x7f")),
-            Magic::A((1, *b"\x00")),
-            Magic::B((2, *b"\xff\xff")),
-            Magic::B((2, *b"\x00\x00")),
-            Magic::C((4, *b"\xff\xff\xff\xff")),
-            Magic::C((4, *b"\x00\x00\x00\x00")),
-            Magic::C((4, *b"\x00\x00\x00\x40")),
-            Magic::C((4, *b"\x00\x00\x00\x80")),
-            Magic::C((4, *b"\xff\xff\xff\x7f")),
-        ];
-
-        match nums[self.hashfunc() % nums.len()] {
+        match MAGIC_VALUES[self.hashfunc() % MAGIC_VALUES.len()] {
             Magic::A(a) => (a.0 as usize, a.1.to_vec()),
             Magic::B(b) => (b.0 as usize, b.1.to_vec()),
             Magic::C(c) => (c.0 as usize, c.1.to_vec()),

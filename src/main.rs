@@ -74,7 +74,7 @@ pub fn _main_loop(
                 ) {
                     crash_corpus.add_and_distill_corpus(corpus_entry);
                     eprintln!(
-                        "\n{}\x1b[31mNew crash!\x1b[0m execs: {}\t updating crash long... {}\n",
+                        "\n{}\x1b[31mNew crash!\x1b[0m execs: {}\t updating crash log... {}\n",
                         String::from_utf8_lossy(&output.stderr),
                         i,
                         &crash_corpus
