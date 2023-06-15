@@ -1,17 +1,15 @@
 <img style="display: block; margin-left: auto; margin-right: auto;" src="/examples/animate_logo/output/ecfuzz.gif" alt="ECFuzz"></img>
 
-## ECFuzz
+# ECFuzz
 Evolutionary Coverage-guided Fuzzing engine. Provides a fuzzing engine library as well as a binary command line interface. Requires clang 14 (or newer) and llvm tools. 
 
 
-### Quick Start
+## Quick Start
 Install clang and llvm tools with your preferred package manager.
+Alternatively, download an installer for clang+LLVM or build from source: <https://github.com/llvm/llvm-project/releases/>
 
-Windows users can download clang+LLVM here: 
-<https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/LLVM-14.0.6-win64.exe>
-
-Run ECFuzz with the command line interface. 
-Use the ``--mutate-stdin`` flag to generate a single mutation from standard input without measuring code coverage. 
+Install ``ecfuzz`` with cargo, and run it using the command line interface. 
+Setting the ``--mutate-stdin`` flag generates a single mutation from standard input without measuring code coverage. 
 Mutated results are output to stdout.
 
 
@@ -21,16 +19,57 @@ ecfuzz --help
 ecfuzz --help | tail -n+4 | ecfuzz --mutate-stdin --seed 1
 ```
 
+See examples below for a demonstration of how source code coverage is measured for a preset number of mutations.
 
-### Example: CLI
-There are 2 errors in ``fuzz_target.c``, occurring after some 'if' statements depending on user input.
-The program will compile and run the target file with embedded instrumentation, and send mutated inputs based on the samples in ``./input/corpus`` to the executable's standard input.
+## How it works
+
+### Corpus Distillation
+1. compile target with code coverage mapping and sanitizers
+2. mutate one of the seeded inputs, and send it to the target via stdin, input file, or command args
+3. measure code coverage as a set of code branches executed
+4. if a new branch is discovered by a mutation, add it to the corpus
+    - compare the new branch coverage to existing corpus entries, and prune entries with a coverage subset of the newest coverage
+
+
+### Number Generation
+
+The xxhash algorithm is used for number generation, which means that fuzzing results will be fully deterministic as long as the input remains unchanged, even across different platforms.
+
+
+### Mutations
+- XOR bit flip + byteshift
+- byte replacement
+- magic character replacement
+- dictionary insertion
+- tokenized dictionary replacement
+
+#### Dictionary mutations
+To enable dictionary mutations, a dictionary filepath must be included.
+Lines in the dictionary file containing `key` items will be spliced into the input.
+Dictionary lines containing `key=value` will be inserted using tokenized replacement , e.g. mutate a `key` item in the seed input by replacing it with a `value`. 
+Keys are split on the first `=` symbol, and keys may be repeated on a new line for multiple values.
+
+
+## Examples
+
+### CLI
+There are 2 errors in [fuzz_target.c](https://github.com/matt24smith/ecfuzz/blob/master/examples/cli/fuzz_target.c), occurring after some 'if' statements depending on user input.
+The program will compile and run the target file with embedded instrumentation, and send mutated inputs based on the samples in ``./examples/cli/input/corpus`` to the executable.
 The code coverage of each new input is monitored, and any inputs yielding new code coverage will be added to the corpus.
 
 ```bash
 git clone https://github.com/matt24smith/ecfuzz.git && cd ecfuzz
+
+# set additional flags for the clang compiler 
 export CFLAGS="-std=c17 -g -fcolor-diagnostics -O3"
-ecfuzz --target ./examples/cli/fuzz_target.c --corpus ./examples/cli/input/corpus --dictionary-path ./examples/cli/input/sample.dict --seed 000 --iterations 5000
+
+# see 'ecfuzz --help' for a complete description of arguments
+ecfuzz \
+    --target ./examples/cli/fuzz_target.c \
+    --corpus ./examples/cli/input/corpus \
+    --dictionary-path ./examples/cli/input/sample.dict \
+    --seed 000 \
+    --iterations 5000
 ```
 
 Initializing the fuzzing engine with seed ``000`` finds both bugs in ``fuzz_target.c`` after 4628 attempts.
@@ -68,34 +107,11 @@ New crash! execs: 4628  crash log:
   Total coverage: {} }
 ```
 
-
-### Example: Custom Fuzzer using ECFuzz Library
+### Custom Fuzzer using ECFuzz Library
 
 Another example shows implementation of a custom fuzzer for ``./examples/lib_custom_fuzzer/example_lib.c`` and ``examples/lib_custom_fuzzer/example.c``, sending inputs as arguments to the target executable
 ```bash
 cargo run --example=custom_fuzzer
 ```
 
-
-### Corpus Distillation Strategy
-1. compile target with code coverage mapping and sanitizers
-2. mutate one of the seeded inputs, and send it to the target via stdin, input file, or command args
-3. measure code coverage as a set of code branches executed
-4. if a new branch is discovered by a mutation, add it to the corpus.
-    - compare the new branch coverage to existing corpus entries, and prune entries with a coverage subset of the newest coverage
-
-
-### Mutations
-- XOR bit flip + byteshift
-- byte replacement
-- magic character replacement
-- dictionary insertion
-- tokenized dictionary replacement
-
-
-#### Dictionary mutations
-To enable dictionary mutations, a dictionary filepath must be included.
-Lines in the dictionary file containing `key` items will be spliced into the input.
-Dictionary lines containing `key=value` will be inserted using tokenized replacement , e.g. mutate a `key` item in the seed input by replacing it with a `value`. 
-Keys are split on the first `=` symbol, and keys may be repeated on a new line for multiple values.
 

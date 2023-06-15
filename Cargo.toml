@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ecfuzz/"
 license = "MIT"
 readme = "./readme.md"
 name = "ecfuzz"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 
 [[bin]]
