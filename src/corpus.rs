@@ -1,7 +1,6 @@
 use std::collections::HashSet;
-use std::fs::{create_dir, read, read_dir, File};
+use std::fs::{create_dir, metadata, read, read_dir, File};
 use std::io::Write;
-use std::iter::zip;
 use std::path::{Path, PathBuf};
 
 use crate::execute::{check_report_coverage, index_target_report, Config, Exec};
@@ -12,8 +11,6 @@ use crate::execute::{check_report_coverage, index_target_report, Config, Exec};
 pub struct CorpusInput {
     pub data: Vec<u8>,
     pub coverage: HashSet<u64>,
-    pub file_stem: PathBuf,
-    pub file_ext: PathBuf,
     pub lifetime: u64,
 }
 
@@ -24,32 +21,38 @@ pub struct Corpus {
 }
 
 impl CorpusInput {
-    /// get the filename for a test input file
-    pub fn get_filename(&self) -> PathBuf {
-        let mut p = PathBuf::from(self.file_stem.to_str().unwrap());
-        p.set_extension(self.file_ext.clone());
-        p
-    }
-
-    /// serialize the test input to an input file
-    pub fn serialize(&self, output_dir: &Path) -> Result<(), std::io::Error> {
+    /// Serialize the test input to an output directory for logging.
+    /// Two files will be created: a .mutation file containing the mutated
+    /// input, and a .coverage file containing the set of code branches hit
+    fn serialize(&self, output_dir: &Path, output_name: &str) -> Result<(), std::io::Error> {
         let mut hits = self.coverage.clone().drain().collect::<Vec<u64>>();
         hits.sort();
         let hit_str = hits
             .iter()
             .map(|u| u.to_string())
             .collect::<Vec<String>>()
-            .join("_");
+            .join("\n");
 
         assert!(output_dir.is_dir());
+
         let mut fpath = output_dir.to_path_buf();
-        let fname = self.get_filename();
-        fpath = fpath.join(fname.to_str().unwrap().to_owned() + "_" + hit_str.as_str());
-        fpath.set_extension(fname.extension().unwrap_or_default());
+        fpath = fpath.join(output_name);
+        fpath.set_extension("mutation");
+
+        let mut cov_path = fpath.clone();
+        cov_path.set_extension("coverage");
 
         #[cfg(debug_assertions)]
         println!("writing to {}", fpath.to_str().unwrap(),);
-        File::create(fpath)?.write_all(&self.data)?;
+
+        File::create(fpath)
+            .expect("creating fpath")
+            .write_all(&self.data)
+            .expect("writing mutation to file");
+        File::create(cov_path.clone())
+            .unwrap_or_else(|_| panic!("creating cov_path: {}", cov_path.to_str().unwrap()))
+            .write_all(hit_str.as_bytes())
+            .expect("writing mutation coverage to file");
 
         Ok(())
     }
@@ -91,123 +94,117 @@ impl Corpus {
         self.inputs.push(new_input);
     }
 
-    /// load a corpus of inputs from a single file, separated by newlines
-    pub fn load_corpus_file(
-        corpus_path: &PathBuf,
-    ) -> std::io::Result<(Vec<Vec<u8>>, Vec<PathBuf>)> {
+    /// Load a corpus of inputs from a single file, separated by newlines.
+    /// No coverage will be measured at this step, see corpus::initialize for
+    /// measuring initial coverage
+    fn load_corpus_file(corpus_path: &PathBuf) -> std::io::Result<Corpus> {
         assert!(!corpus_path.is_dir());
-
-        fn new_fpath(corpus_path: &Path) -> PathBuf {
-            let output_dir = PathBuf::from("output");
-            if !output_dir.is_dir() {
-                create_dir(output_dir.clone()).expect("creating output directory");
-            };
-            let basename = corpus_path.file_stem().unwrap().to_str().unwrap();
-            output_dir.join(Path::new(&basename))
-        }
 
         let f: Vec<u8> = read(corpus_path).expect("couldn't find corpus path!");
         let inputs = f
             .split(|x| x == &b'\n')
             .map(|x| x.to_vec())
             .filter(|x| !x.is_empty())
-            .collect::<Vec<Vec<u8>>>();
+            .map(|x| CorpusInput {
+                data: x,
+                coverage: HashSet::new(),
+                lifetime: 0,
+            })
+            .collect::<Vec<CorpusInput>>();
 
-        let names: Vec<PathBuf> = (0..inputs.len()).map(|_i| new_fpath(corpus_path)).collect();
-        Ok((inputs, names))
+        Ok(Corpus {
+            inputs,
+            total_coverage: HashSet::new(),
+        })
     }
+
     /// load a corpus of input files from a directory path
-    pub fn load_corpus_dir(corpus_dir: &PathBuf) -> std::io::Result<(Vec<Vec<u8>>, Vec<PathBuf>)> {
+    /// No coverage will be measured at this step, see corpus::initialize for
+    /// measuring initial coverage
+    fn load_corpus_dir(corpus_dir: &PathBuf) -> std::io::Result<Corpus> {
         let filepaths: Vec<PathBuf> = read_dir(corpus_dir)
             .unwrap()
             .map(|f| f.unwrap().path())
             .collect();
 
-        let files = filepaths
+        let inputs = filepaths
             .iter()
             .map(|e| read(e).expect("reading corpus dir"))
-            .collect::<Vec<Vec<u8>>>();
-
-        let output_dir = PathBuf::from("output");
-        assert!(output_dir.is_dir());
-
-        let outfile_prefixes: Vec<PathBuf> = filepaths
-            .iter()
-            .map(|p| output_dir.clone().join(p.file_stem().unwrap()))
-            .collect();
-
-        let extensions: Vec<String> = filepaths
-            .iter()
-            .map(|f| {
-                f.extension()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap()
-                    .to_string()
+            .map(|x| CorpusInput {
+                data: x,
+                coverage: HashSet::new(),
+                lifetime: 0,
             })
-            .collect();
+            .collect::<Vec<CorpusInput>>();
 
-        let outfiles: Vec<PathBuf> = zip(outfile_prefixes, extensions)
-            .map(|(o, e)| o.with_extension(e))
-            .collect();
-
-        for (mut o, f) in zip(outfiles.clone(), filepaths) {
-            o.set_extension(f.extension().unwrap_or_default());
-        }
-
-        Ok((files, outfiles))
+        Ok(Corpus {
+            inputs,
+            total_coverage: HashSet::new(),
+        })
     }
 
-    /// load the corpus from a newline-separated file, or directory of files
-    pub fn load(
-        &mut self,
-        cfg: &Config,
-        corpus_path: &PathBuf,
-        is_dir: bool,
-    ) -> std::io::Result<()> {
-        let profraw = &format!("output/{}.profraw", std::process::id());
-        let profdata = &format!("output/{}.profdata", std::process::id());
-        let (inputs, filenames) = if is_dir {
-            Corpus::load_corpus_dir(corpus_path)?
+    /// Load the corpus from a newline-separated file, or directory of files.
+    /// After loading into memory, initialize the corpus by measuring the
+    /// coverage of each corpus input
+    pub fn load(corpus_path: &PathBuf) -> std::io::Result<Corpus> {
+        if metadata(corpus_path)
+            .expect("getting corpus path metadata")
+            .is_dir()
+        {
+            Corpus::load_corpus_dir(corpus_path)
         } else {
-            Corpus::load_corpus_file(corpus_path)?
-        };
-        for (input, filename) in zip(inputs, filenames) {
-            let (input, _crashed) = Exec::trial(
-                cfg,
-                profraw,
-                profdata,
-                &input,
-                PathBuf::from(filename.file_stem().unwrap()),
-                PathBuf::from(filename.extension().unwrap_or_default()),
-                0,
-            );
-            index_target_report(cfg, profraw, profdata).unwrap();
-            let coverage = check_report_coverage(cfg, profdata).unwrap();
-
-            self.total_coverage.extend(&coverage);
-            self.add_and_distill_corpus(CorpusInput {
-                data: input.data,
-                file_stem: input.file_stem,
-                file_ext: input.file_ext,
-                coverage,
-                lifetime: 0,
-            });
+            Corpus::load_corpus_file(corpus_path)
         }
-        Ok(())
+    }
+
+    /// append the inputs of another corpus into this corpus
+    pub fn append(&mut self, corpus: Corpus) {
+        for input in &corpus.inputs {
+            self.inputs.push(input.clone());
+            self.total_coverage.extend(&input.coverage);
+        }
     }
 
     /// append corpus entries to the corpus file.
-    /// a {corpus_path}.coverage file will be appended with branch coverage info
+    /// a .coverage file will also be created with branch coverage info
     pub fn save(&self, output_dir: PathBuf) -> std::io::Result<()> {
         if !output_dir.exists() {
             std::fs::create_dir_all(&output_dir).unwrap();
         }
-        for input in &self.inputs {
-            input.serialize(&output_dir).unwrap();
+
+        for (i, input) in self.inputs.iter().enumerate() {
+            input
+                .serialize(&output_dir, format!("{}", i).as_str())
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "serializing {} as file in directory {}",
+                        i,
+                        output_dir.as_path().to_str().unwrap()
+                    )
+                });
         }
 
         Ok(())
+    }
+
+    /// update code coverage metrics for corpus inputs without mutating
+    pub fn initialize(&mut self, cfg: &Config) {
+        let output_dir = PathBuf::from("output");
+        if !output_dir.is_dir() {
+            create_dir(output_dir).expect("creating output directory");
+        };
+        let profraw = &format!("output/{}.profraw", std::process::id());
+        let profdata = &format!("output/{}.profdata", std::process::id());
+        for input in &self.inputs {
+            let (mut input, _crashed) =
+                Exec::trial(cfg, profraw, profdata, input, input.lifetime + 1);
+            index_target_report(cfg, profraw, profdata).unwrap();
+            input
+                .coverage
+                .extend(check_report_coverage(cfg, profdata).expect("checking coverage report"));
+
+            self.total_coverage.extend(&input.coverage);
+        }
     }
 }
 
@@ -218,7 +215,6 @@ impl std::fmt::Debug for CorpusInput {
             maxlen = self.data.len();
         }
         f.debug_struct("\n    CorpusInput: ")
-            .field("stem", &self.file_stem)
             .field("coverage", &self.coverage)
             .field("lifetime", &self.lifetime)
             .field("preview", &String::from_utf8_lossy(&self.data[0..maxlen]))
@@ -232,7 +228,6 @@ impl std::fmt::Display for CorpusInput {
             maxlen = self.data.len();
         }
         f.debug_struct("\n    CorpusInput: ")
-            .field("stem", &self.file_stem)
             .field("coverage", &self.coverage)
             .field("lifetime", &self.lifetime)
             .field("data", &String::from_utf8_lossy(&self.data[0..maxlen]))
@@ -266,32 +261,33 @@ impl Default for Corpus {
 #[cfg(test)]
 mod tests {
     use super::Corpus;
-    use crate::execute::Config;
+    use crate::execute::{Config, Exec};
     use std::path::PathBuf;
 
     #[test]
     fn test_load_corpus() {
-        let cfg = Config::defaults();
-        let mut corpus = Corpus::new();
-        corpus
-            .load(&cfg, &PathBuf::from("examples/cli/input/corpus"), false)
-            .unwrap();
-        corpus
-            .load(
-                &cfg,
-                &PathBuf::from("examples/cli/input/sample.dict"),
-                false,
-            )
-            .unwrap();
+        let corpus = Corpus::load(&PathBuf::from("./examples/cli/input/corpus")).unwrap();
         assert!(!corpus.inputs.is_empty());
     }
 
     #[test]
     fn test_load_corpus_dir() {
-        let cfg = Config::defaults();
-        let mut corpus = Corpus::new();
-        corpus.load(&cfg, &PathBuf::from("./tests/"), true).unwrap();
-        //corpus.load(&cfg, &PathBuf::from("./input/testing/"), true);
+        let corpus = Corpus::load(&PathBuf::from("./tests/")).unwrap();
         assert!(!corpus.inputs.is_empty());
+    }
+
+    #[test]
+    fn test_initialize_corpus_coverage() {
+        let mut corpus = Corpus::load(&PathBuf::from("./examples/cli/input/corpus")).unwrap();
+        assert!(!corpus.inputs.is_empty());
+
+        let mut cfg = Config::defaults();
+        cfg.target_path = PathBuf::from("./examples/cli/fuzz_target.c");
+
+        // compile target with instrumentation
+        Exec::initialize(&cfg).unwrap();
+
+        // check coverage of initial inputs
+        corpus.initialize(&cfg);
     }
 }

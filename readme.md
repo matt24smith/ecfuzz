@@ -1,4 +1,4 @@
-<img style="display: block; margin-left: auto; margin-right: auto;" src="/examples/animate_logo/output/ecfuzz.gif" alt="ECFuzz"></img>
+<img style="display: block; margin-left: auto; margin-right: auto;" src="https://raw.githubusercontent.com/matt24smith/ecfuzz/master/examples/animate_logo/output/ecfuzz.gif" alt="ECFuzz"></img>
 
 # ECFuzz
 Evolutionary Coverage-guided Fuzzing engine. Provides a fuzzing engine library as well as a binary command line interface. Requires clang 14 (or newer) and llvm tools. 

@@ -70,7 +70,7 @@ enum Magic {
     C((u8, [u8; 4])),
 }
 
-const MAGIC_VALUES: &'static [&'static Magic; 10] = &[
+const MAGIC_VALUES: &[&Magic; 10] = &[
     &Magic::A((1, *b"\xff")),
     &Magic::A((1, *b"\x7f")),
     &Magic::A((1, *b"\x00")),

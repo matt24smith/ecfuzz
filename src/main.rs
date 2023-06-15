@@ -5,7 +5,7 @@ use std::process::id;
 //use std::time::{Duration, Instant};
 use std::time::Instant;
 
-use ecfuzz::corpus::Corpus;
+use ecfuzz::corpus::{Corpus, CorpusInput};
 use ecfuzz::execute::{count_branch_total, Config, Exec, ExecResult};
 use ecfuzz::mutator::Mutation;
 
@@ -35,13 +35,18 @@ pub fn _main_loop(
         mutation.data = cov_corpus.inputs[idx].data.clone();
         mutation.mutate();
 
+        let mutation_trial = CorpusInput {
+            data: mutation.data.clone(),
+            coverage: cov_corpus.inputs[idx].coverage.clone(),
+            lifetime: cov_corpus.inputs[idx].lifetime,
+        };
+
         let (corpus_entry, result) = Exec::trial(
             cfg,
             &profraw,
             &profdata,
-            &mutation.data,
-            cov_corpus.inputs[idx].file_stem.clone(),
-            cov_corpus.inputs[idx].file_ext.clone(),
+            //&mutation.data,
+            &mutation_trial,
             cov_corpus.inputs[idx].lifetime,
         );
 
@@ -52,7 +57,7 @@ pub fn _main_loop(
                     .total_coverage
                     .is_superset(&corpus_entry.coverage)
                 {
-                    corpus_entry.serialize(&outdir).unwrap();
+                    //corpus_entry.serialize(&outdir).unwrap();
                     cov_corpus.add_and_distill_corpus(corpus_entry.clone());
                     println!(
                         "\n\x1b[32mNew coverage hit!\x1b[0m execs: {}\tupdating inputs... {}\n",
@@ -138,17 +143,16 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let profraw = &format!("output/{}.profraw", id());
     let profdata = &format!("output/{}.profdata", id());
 
-    // check code coverage for initial corpus inputs
+    // load corpus into memory
     for filepath in &cfg.corpus_files {
-        cov_corpus
-            .load(&cfg, filepath, false)
-            .expect("loading corpus from file");
+        cov_corpus.append(Corpus::load(filepath).expect("reading corpus file"))
     }
     for filepath in &cfg.corpus_dirs {
-        cov_corpus
-            .load(&cfg, filepath, true)
-            .expect("loading corpus from directory");
+        cov_corpus.append(Corpus::load(filepath).expect("reading corpus dir"))
     }
+
+    // check initial corpus coverage
+    cov_corpus.initialize(&cfg);
 
     let branch_count = count_branch_total(&cfg, profdata)?;
 

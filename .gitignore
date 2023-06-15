@@ -2,6 +2,9 @@
 **json
 **profdata
 **profraw
+**.coverage
+**.mutation
+**.dSYM
 a.exp
 a.lib
 a.out

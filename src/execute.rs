@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::env::set_var;
 use std::ffi::OsString;
+use std::fs::remove_file;
 use std::io::{BufWriter, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt;
@@ -123,16 +124,18 @@ impl Config {
             iterations: 10000,
             target_path: PathBuf::from("./fuzz_target.c"),
 
-            #[cfg(not(target_os = "windows"))]
+            // default paths for Linux
+            #[cfg(target_os = "linux")]
             cc_path: PathBuf::from("/usr/bin/clang"),
-            #[cfg(target_os = "windows")]
-            cc_path: PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe"),
-
             #[cfg(target_os = "linux")]
             llvm_profdata_path: PathBuf::from("/usr/bin/llvm-profdata"),
             #[cfg(target_os = "linux")]
             llvm_cov_path: PathBuf::from("/usr/bin/llvm-cov"),
 
+            // default paths for MacOS
+            #[cfg(target_os = "macos")]
+            //cc_path: PathBuf::from("/Library/Developer/CommandLineTools/usr/bin/clang"),
+            cc_path: PathBuf::from("/usr/bin/clang"),
             #[cfg(target_os = "macos")]
             llvm_profdata_path: PathBuf::from(
                 "/Library/Developer/CommandLineTools/usr/bin/llvm-profdata",
@@ -140,6 +143,9 @@ impl Config {
             #[cfg(target_os = "macos")]
             llvm_cov_path: PathBuf::from("/Library/Developer/CommandLineTools/usr/bin/llvm-cov"),
 
+            // default paths for Windows
+            #[cfg(target_os = "windows")]
+            cc_path: PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe"),
             #[cfg(target_os = "windows")]
             llvm_profdata_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-profdata.exe"),
             #[cfg(target_os = "windows")]
@@ -167,6 +173,12 @@ impl Config {
             }
         }
 
+        // print help text
+        if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
+            println!("{}", help());
+            std::process::exit(0);
+        }
+
         // warn about extra arguments
         let argstring = help().replace(',', " ");
         let known_args: Vec<&str> = argstring
@@ -182,12 +194,6 @@ impl Config {
         // mutator mode
         if std::env::args().any(|x| x == *"--mutate-stdin" || x == *"-") {
             mutate_stdin()?;
-            std::process::exit(0);
-        }
-
-        // print help text
-        if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-            println!("{}", help());
             std::process::exit(0);
         }
 
@@ -443,18 +449,30 @@ impl Exec {
         cfg: &Config,
         profraw: &str,
         profdata: &str,
-        test_input: &Vec<u8>,
-        file_stem: PathBuf,
-        file_ext: PathBuf,
+        test_input: &CorpusInput,
         lifetime: u64,
     ) -> (CorpusInput, ExecResult<Output>) {
-        let output = exec_target(cfg, profraw, test_input);
+        let output = exec_target(cfg, profraw, &test_input.data);
         index_target_report(cfg, profraw, profdata).unwrap();
+
+        // if the program crashes during execution, code coverage checking may
+        // yield an empty set. in this case the parent mutation coverage is used
+        let new_coverage: HashSet<u64> = match output {
+            ExecResult::Ok(_) => check_report_coverage(cfg, profdata).unwrap(),
+            ExecResult::Err(_) => {
+                let cov = check_report_coverage(cfg, profdata).unwrap();
+                if cov.is_empty() {
+                    test_input.coverage.clone()
+                } else {
+                    cov
+                }
+            }
+        };
+        //let new_coverage = ;
+
         let result = CorpusInput {
-            data: test_input.to_owned(),
-            coverage: check_report_coverage(cfg, profdata).unwrap(),
-            file_ext,
-            file_stem,
+            data: test_input.data.to_owned(),
+            coverage: new_coverage,
             lifetime: lifetime + 1,
         };
         (result, output)
@@ -598,6 +616,7 @@ pub fn index_target_report(
         .args(prof_merge_args)
         .output()?;
     if !prof_merge_result.status.success() {
+        remove_file(raw_profile_filepath).expect("removing profraw");
         panic!("\n{}", String::from_utf8_lossy(&prof_merge_result.stderr))
     }
     Ok(())

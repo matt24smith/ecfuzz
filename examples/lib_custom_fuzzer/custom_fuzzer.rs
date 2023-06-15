@@ -21,8 +21,10 @@ struct MyTargetInput {
 
 struct MyFuzzEngine {
     mutation_engine: Mutation,
-    firstname_seeds: Vec<Vec<u8>>,
-    lastname_seeds: Vec<Vec<u8>>,
+    //firstname_seeds: Vec<Vec<u8>>,
+    //lastname_seeds: Vec<Vec<u8>>,
+    firstname_seeds: Corpus,
+    lastname_seeds: Corpus,
     pub data: MyTargetInput,
 }
 
@@ -56,8 +58,8 @@ impl MyTargetInput {
             data: bytes,
             coverage,
             lifetime: 0,
-            file_stem: PathBuf::from("MyCustomInput"),
-            file_ext: PathBuf::from("mutation"),
+            //file_stem: PathBuf::from("MyCustomInput"),
+            //file_ext: PathBuf::from("mutation"),
         }
     }
 
@@ -103,16 +105,25 @@ impl MyFuzzEngine {
         let multiplier = Some(0.01);
         let dict_path: Option<PathBuf> = None;
 
-        let firstnames = Corpus::load_corpus_file(&PathBuf::from(
+        //let firstnames = Corpus::load_corpus_file(&PathBuf::from(
+        //    "examples/lib_custom_fuzzer/input/firstname.dict",
+        //))
+        //.expect("loading firstname dict")
+        //    .0;
+        let firstnames = Corpus::load(&PathBuf::from(
             "examples/lib_custom_fuzzer/input/firstname.dict",
         ))
-        .expect("loading firstname dict")
-        .0;
-        let lastnames = Corpus::load_corpus_file(&PathBuf::from(
+        .expect("loading first names dict");
+
+        //let lastnames = Corpus::load_corpus_file(&PathBuf::from(
+        //    "examples/lib_custom_fuzzer/input/lastname.dict",
+        //))
+        //.expect("loading lastname dict")
+        //.0;
+        let lastnames = Corpus::load(&PathBuf::from(
             "examples/lib_custom_fuzzer/input/lastname.dict",
         ))
-        .expect("loading lastname dict")
-        .0;
+        .expect("loading last names dict");
 
         MyFuzzEngine {
             mutation_engine: Mutation::new(dict_path, multiplier),
@@ -148,8 +159,9 @@ impl MyFuzzEngine {
         self
     }
     fn mutate_string_1(mut self) -> Self {
-        self.mutation_engine.data = self.firstname_seeds
-            [self.mutation_engine.hashfunc() % self.firstname_seeds.len()]
+        self.mutation_engine.data = self.firstname_seeds.inputs
+            [self.mutation_engine.hashfunc() % self.firstname_seeds.inputs.len()]
+        .data
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
             self.mutation_engine.mutate();
@@ -161,8 +173,9 @@ impl MyFuzzEngine {
         self
     }
     fn mutate_string_2(mut self) -> Self {
-        self.mutation_engine.data = self.lastname_seeds
-            [self.mutation_engine.hashfunc() % self.lastname_seeds.len()]
+        self.mutation_engine.data = self.lastname_seeds.inputs
+            [self.mutation_engine.hashfunc() % self.lastname_seeds.inputs.len()]
+        .data
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
             self.mutation_engine.mutate();
@@ -174,8 +187,9 @@ impl MyFuzzEngine {
         self
     }
     fn mutate_string_3(mut self) -> Self {
-        self.mutation_engine.data = self.lastname_seeds
-            [self.mutation_engine.hashfunc() % self.lastname_seeds.len()]
+        self.mutation_engine.data = self.lastname_seeds.inputs
+            [self.mutation_engine.hashfunc() % self.lastname_seeds.inputs.len()]
+        .data
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
             while self.mutation_engine.data.contains(&b'\0') {
@@ -247,21 +261,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut timer_start = Instant::now();
     for i in 0..cfg.iterations {
         // deserialize mutation inputs stored in the corpus
-        let input_raw: CorpusInput = cov_corpus.inputs[i % cov_corpus.inputs.len()].clone();
+        let idx = i % cov_corpus.inputs.len();
+        let input_raw: CorpusInput = cov_corpus.inputs[idx].clone();
         engine.data = MyTargetInput::deserialize(&input_raw);
 
         // apply a mutation
         engine = engine.mutate(cov_corpus.total_coverage.len());
         let mutated = engine.data.clone();
 
+        let mutation_trial = CorpusInput {
+            data: mutated
+                .clone()
+                .serialize(cov_corpus.inputs[idx].coverage.clone())
+                .data
+                .clone(),
+            coverage: cov_corpus.inputs[idx].coverage.clone(),
+            lifetime: cov_corpus.inputs[idx].lifetime,
+        };
+
         // run the program with mutated inputs, log crashes to crash corpus
         let (entry, output) = Exec::trial(
             &cfg,
             profraw,
             profdata,
-            &mutated.clone().serialize(HashSet::default()).data,
-            PathBuf::new(),
-            PathBuf::new(),
+            //&mutated.clone().serialize(HashSet::default()).data,
+            &mutation_trial,
+            //PathBuf::new(),
+            //PathBuf::new(),
             0,
         );
 
