@@ -195,7 +195,7 @@ pub fn _main_loop(
         );
 
         // print some status info
-        if i % cfg.iter_check == 0 && i > 0 {
+        if i % cfg.iter_check == 0 && 0 < i && i <= cfg.iterations {
             print!(
                 "\rcoverage: {:>2}/{}  exec/s: {:.2}  inputs: {}  new crashes: {}  i: {:<4}  {}",
                 cov_corpus.total_coverage.len(),

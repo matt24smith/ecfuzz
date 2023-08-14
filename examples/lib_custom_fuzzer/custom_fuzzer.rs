@@ -4,8 +4,9 @@ use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use ecfuzz::config::Config;
 use ecfuzz::corpus::{Corpus, CorpusInput};
-use ecfuzz::execute::{Config, Exec, ExecResult};
+use ecfuzz::execute::{Exec, ExecResult};
 use ecfuzz::mutator::Mutation;
 
 #[repr(C)]

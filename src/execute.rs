@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::remove_file;
 use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 #[cfg(target_os = "linux")]
@@ -20,6 +21,11 @@ use crate::mutator::byte_index;
 
 pub struct Exec {
     pub cfg: Config,
+}
+
+pub enum ExecResult<Output> {
+    Ok(Output),
+    Err(Output),
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -116,22 +122,22 @@ impl Exec {
         test_input: &CorpusInput,
         lifetime: u64,
     ) -> (CorpusInput, ExecResult<Output>) {
-        let profraw = format!(
+        let profraw = PathBuf::from(format!(
             "output/{}.profraw",
             std::thread::current().name().expect("getting thread name"),
-        );
-        let profdata = format!(
+        ));
+        let profdata = PathBuf::from(format!(
             "output/{}.profdata",
             std::thread::current().name().expect("getting thread name"),
-        );
+        ));
 
         #[cfg(debug_assertions)]
-        assert!(!std::path::Path::new(&profraw).exists()); // ensure profile data was cleaned up last time
+        assert!(!profraw.exists()); // ensure profile data was cleaned up last time
 
         let output = exec_target(cfg, &profraw, &test_input.data);
 
         #[cfg(debug_assertions)]
-        assert!(std::path::Path::new(&profraw).exists()); // ensure profile data was generated
+        assert!(profraw.exists()); // ensure profile data was generated
 
         index_target_report(cfg, &profraw, &profdata).unwrap();
         remove_file(&profraw).expect("removing raw profile data");
@@ -161,29 +167,22 @@ impl Exec {
 
     /// count the number of code branches in the coverage file
     pub fn count_branch_total(cfg: &Config) -> Result<u64, Box<dyn std::error::Error>> {
-        let profraw = format!(
+        let profraw = PathBuf::from(format!(
             "output/{}.profraw",
             std::thread::current().name().expect("getting thread name"),
-        );
-        let profdata = format!(
+        ));
+        let profdata = PathBuf::from(format!(
             "output/{}.profdata",
             std::thread::current().name().expect("getting thread name"),
-        );
-
-        #[cfg(debug_assertions)]
-        assert!(!std::path::Path::new(&profraw).exists()); // ensure profile data was cleaned up last time
+        ));
 
         let _output = exec_target(cfg, &profraw, b"");
 
-        #[cfg(debug_assertions)]
-        assert!(std::path::Path::new(&profraw).exists()); // ensure profile data was generated
-
         index_target_report(cfg, &profraw, &profdata).unwrap();
-        remove_file(&profraw).expect("removing raw profile data");
+        remove_file(profraw).expect("removing raw profile data");
 
-        //let cov = check_report_coverage(cfg, &profdata).unwrap();
         let report: ReportFile = read_report(cfg, &profdata)?;
-        remove_file(&profdata).expect("removing coverage profile data");
+        remove_file(profdata).expect("removing coverage profile data");
 
         let mut n: u64 = 0;
         for file in report.files {
@@ -197,15 +196,10 @@ impl Exec {
     }
 }
 
-pub enum ExecResult<Output> {
-    Ok(Output),
-    Err(Output),
-}
-
 /// execute the target program with a new test input either via an input file,
 /// command line arguments, or by sending to the target stdin, as defined in
 /// Config
-fn exec_target(cfg: &Config, raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
+fn exec_target(cfg: &Config, raw_profile_filepath: &PathBuf, input: &[u8]) -> ExecResult<Output> {
     if cfg.mutate_file {
         exec_target_filein(raw_profile_filepath, input)
     } else if cfg.mutate_args {
@@ -216,7 +210,7 @@ fn exec_target(cfg: &Config, raw_profile_filepath: &str, input: &[u8]) -> ExecRe
 }
 
 /// execute the target program with test input sent to stdin
-fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
+fn exec_target_stdin(raw_profile_filepath: &PathBuf, input: &[u8]) -> ExecResult<Output> {
     #[cfg(debug_assertions)]
     assert!(!std::path::Path::new(&raw_profile_filepath).exists()); // ensure profile data was cleaned up last time
     let mut profile_target = Command::new("./a.out")
@@ -246,7 +240,7 @@ fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Out
 }
 
 /// execute the target program with test input sent via an input file
-fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
+fn exec_target_filein(raw_profile_filepath: &PathBuf, input: &[u8]) -> ExecResult<Output> {
     let fname = format!("{}.mutation", std::thread::current().name().unwrap());
     let mut f = BufWriter::new(std::fs::File::create(&fname).unwrap());
     f.write_all(input).unwrap();
@@ -271,7 +265,7 @@ fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Ou
 }
 
 /// execute the target program with test input sent via program arguments
-pub fn exec_target_args(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
+pub fn exec_target_args(raw_profile_filepath: &PathBuf, input: &[u8]) -> ExecResult<Output> {
     let mut args: Vec<Vec<_>> = vec![];
     let mut cursor: Vec<_> = Vec::new();
 
@@ -313,16 +307,20 @@ pub fn exec_target_args(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<
 /// convert raw profile data to an indexed file format
 fn index_target_report(
     cfg: &Config,
-    raw_profile_filepath: &str,
-    profile_filepath: &str,
+    raw_profile_filepath: &Path,
+    profile_filepath: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let prof_merge_args = &[
         "merge".to_string(),
         "-sparse".to_string(),
         //"--instr".to_string(),
-        raw_profile_filepath.to_string(),
+        raw_profile_filepath
+            .as_os_str()
+            .to_str()
+            .unwrap()
+            .to_string(),
         "-o".to_string(),
-        profile_filepath.to_string(),
+        profile_filepath.as_os_str().to_str().unwrap().to_string(),
     ];
     let prof_merge_result = Command::new(&cfg.llvm_profdata_path)
         .args(prof_merge_args)
@@ -340,12 +338,16 @@ fn index_target_report(
 /// deserialized indexed report data, and return branch coverage
 fn read_report(
     cfg: &Config,
-    profile_filepath: &str,
+    profile_filepath: &PathBuf,
 ) -> Result<ReportFile, Box<dyn std::error::Error>> {
-    let mut prof_report_args: Vec<String> = ["export", "--instr-profile", profile_filepath]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let mut prof_report_args: Vec<String> = [
+        "export",
+        "--instr-profile",
+        profile_filepath.as_os_str().to_str().unwrap(),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
 
     #[cfg(debug_assertions)]
     assert!(!cfg.objects.is_empty());
@@ -361,7 +363,7 @@ fn read_report(
     let prof_report_raw = prof_report_result.stdout;
     if prof_report_raw.is_empty() {
         panic!(
-            "empty profdata: {}\nargs: {:?}",
+            "empty profdata: {:#?}\nargs: {:?}",
             profile_filepath, prof_report_args
         );
     }
@@ -375,7 +377,7 @@ fn read_report(
 /// read coverage report file and create a HashSet from branches covered in the coverage file
 pub fn check_report_coverage(
     cfg: &Config,
-    profile_filepath: &str,
+    profile_filepath: &PathBuf,
 ) -> Result<HashSet<u64>, Box<dyn std::error::Error>> {
     let report: ReportFile = read_report(cfg, profile_filepath)?;
 

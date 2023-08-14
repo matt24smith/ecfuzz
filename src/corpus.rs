@@ -260,7 +260,8 @@ impl Default for Corpus {
 #[cfg(test)]
 mod tests {
     use super::Corpus;
-    use crate::execute::{Config, Exec};
+    use crate::config::Config;
+    use crate::execute::Exec;
     use std::path::PathBuf;
 
     #[test]
