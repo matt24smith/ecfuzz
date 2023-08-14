@@ -3,7 +3,7 @@ use std::fs::{create_dir, metadata, read, read_dir, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::execute::{check_report_coverage, index_target_report, Config, Exec};
+use crate::execute::{Config, Exec};
 
 /// each test input sent to the target program contains the byte vector
 /// to be tested, as well as the resulting branch coverage set and some metadata
@@ -21,6 +21,14 @@ pub struct Corpus {
 }
 
 impl CorpusInput {
+    /// Initialize a new CorpusInput with empty values
+    pub fn empty() -> Self {
+        CorpusInput {
+            data: b"".to_vec(),
+            coverage: HashSet::new(),
+            lifetime: 0,
+        }
+    }
     /// Serialize the test input to an output directory for logging.
     /// Two files will be created: a .mutation file containing the mutated
     /// input, and a .coverage file containing the set of code branches hit
@@ -119,8 +127,6 @@ impl Corpus {
     }
 
     /// load a corpus of input files from a directory path
-    /// No coverage will be measured at this step, see corpus::initialize for
-    /// measuring initial coverage
     fn load_corpus_dir(corpus_dir: &PathBuf) -> std::io::Result<Corpus> {
         let filepaths: Vec<PathBuf> = read_dir(corpus_dir)
             .unwrap()
@@ -144,8 +150,8 @@ impl Corpus {
     }
 
     /// Load the corpus from a newline-separated file, or directory of files.
-    /// After loading into memory, initialize the corpus by measuring the
-    /// coverage of each corpus input
+    /// No coverage will be measured at this step, see corpus::initialize for
+    /// measuring initial coverage
     pub fn load(corpus_path: &PathBuf) -> std::io::Result<Corpus> {
         if metadata(corpus_path)
             .expect("getting corpus path metadata")
@@ -161,8 +167,8 @@ impl Corpus {
     pub fn append(&mut self, corpus: Corpus) {
         for input in &corpus.inputs {
             self.inputs.push(input.clone());
-            self.total_coverage.extend(&input.coverage);
         }
+        self.total_coverage.extend(&corpus.total_coverage);
     }
 
     /// append corpus entries to the corpus file.
@@ -193,17 +199,9 @@ impl Corpus {
         if !output_dir.is_dir() {
             create_dir(output_dir).expect("creating output directory");
         };
-        let profraw = &format!("output/{}.profraw", std::process::id());
-        let profdata = &format!("output/{}.profdata", std::process::id());
         for input in &self.inputs {
-            let (mut input, _crashed) =
-                Exec::trial(cfg, profraw, profdata, input, input.lifetime + 1);
-            index_target_report(cfg, profraw, profdata).unwrap();
-            input
-                .coverage
-                .extend(check_report_coverage(cfg, profdata).expect("checking coverage report"));
-
-            self.total_coverage.extend(&input.coverage);
+            let (input_updated, _crashed) = Exec::trial(cfg, input, input.lifetime + 1);
+            self.total_coverage.extend(&input_updated.coverage);
         }
     }
 }

@@ -1,17 +1,17 @@
 use std::collections::HashSet;
-use std::env::set_var;
 use std::ffi::OsString;
 use std::fs::remove_file;
 use std::io::{BufWriter, Write};
+use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
+use std::time::SystemTime;
+
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::time::SystemTime;
 
 use serde::Deserialize;
 use serde_json::Value as jsonValue;
@@ -56,7 +56,8 @@ Options:
                                 used, the options below will be ignored.
 
   -f, --mutate-file             If this flag is set, mutations will be written
-                                to './input.mutation' instead of the target stdin
+                                to './ecfuzz-worker-N.mutation' instead of the
+                                target stdin
 
   -t, --target <fuzz_target.c>  Clang input file. Defaults to '{}'
 
@@ -93,6 +94,7 @@ Pass additional args to the compiler by setting $CFLAGS
     help
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub cc_path: PathBuf,
     pub iter_check: usize,
@@ -120,7 +122,7 @@ impl Config {
     /// initialize target execution config with default values
     pub fn defaults() -> Self {
         Config {
-            iter_check: 100, // frequency of printed status updates
+            iter_check: 50, // frequency of printed status updates
             iterations: 10000,
             target_path: PathBuf::from("./fuzz_target.c"),
 
@@ -139,8 +141,8 @@ impl Config {
             #[cfg(target_os = "macos")]
             llvm_profdata_path: PathBuf::from(
                 "/Library/Developer/CommandLineTools/usr/bin/llvm-profdata",
-            ),
-            #[cfg(target_os = "macos")]
+                ),
+                #[cfg(target_os = "macos")]
             llvm_cov_path: PathBuf::from("/Library/Developer/CommandLineTools/usr/bin/llvm-cov"),
 
             // default paths for Windows
@@ -385,7 +387,7 @@ impl Exec {
         println!("CFLAGS={:?}", cflag_var);
         let cflags = cflag_var.split(' ');
 
-        let mut setup_args: Vec<String> = vec![
+        let mut setup_args: Vec<String> = [
             (cfg.target_path.as_os_str().to_str().unwrap()),
             "-o",
             "a.out",
@@ -444,23 +446,40 @@ impl Exec {
     }
 
     /// execute the target program with a new test input.
-    /// record the profiled data to profraw, and index report to profdata
+    /// records profile data to the output directory.
     pub fn trial(
         cfg: &Config,
-        profraw: &str,
-        profdata: &str,
         test_input: &CorpusInput,
         lifetime: u64,
     ) -> (CorpusInput, ExecResult<Output>) {
-        let output = exec_target(cfg, profraw, &test_input.data);
-        index_target_report(cfg, profraw, profdata).unwrap();
+        let profraw = format!(
+            "output/{}.profraw",
+            std::thread::current().name().expect("getting thread name"),
+        );
+        let profdata = format!(
+            "output/{}.profdata",
+            std::thread::current().name().expect("getting thread name"),
+        );
+
+        #[cfg(debug_assertions)]
+        assert!(!std::path::Path::new(&profraw).exists()); // ensure profile data was cleaned up last time
+
+        let output = exec_target(cfg, &profraw, &test_input.data);
+
+        #[cfg(debug_assertions)]
+        assert!(std::path::Path::new(&profraw).exists()); // ensure profile data was generated
+
+        index_target_report(cfg, &profraw, &profdata).unwrap();
+        remove_file(&profraw).expect("removing raw profile data");
+
+        let cov = check_report_coverage(cfg, &profdata).unwrap();
+        remove_file(&profdata).expect("removing coverage profile data");
 
         // if the program crashes during execution, code coverage checking may
         // yield an empty set. in this case the parent mutation coverage is used
         let new_coverage: HashSet<u64> = match output {
-            ExecResult::Ok(_) => check_report_coverage(cfg, profdata).unwrap(),
+            ExecResult::Ok(_) => cov,
             ExecResult::Err(_) => {
-                let cov = check_report_coverage(cfg, profdata).unwrap();
                 if cov.is_empty() {
                     test_input.coverage.clone()
                 } else {
@@ -468,14 +487,49 @@ impl Exec {
                 }
             }
         };
-        //let new_coverage = ;
-
         let result = CorpusInput {
             data: test_input.data.to_owned(),
             coverage: new_coverage,
             lifetime: lifetime + 1,
         };
         (result, output)
+    }
+
+    /// count the number of code branches in the coverage file
+    pub fn count_branch_total(cfg: &Config) -> Result<u64, Box<dyn std::error::Error>> {
+        let profraw = format!(
+            "output/{}.profraw",
+            std::thread::current().name().expect("getting thread name"),
+        );
+        let profdata = format!(
+            "output/{}.profdata",
+            std::thread::current().name().expect("getting thread name"),
+        );
+
+        #[cfg(debug_assertions)]
+        assert!(!std::path::Path::new(&profraw).exists()); // ensure profile data was cleaned up last time
+
+        let _output = exec_target(cfg, &profraw, b"");
+
+        #[cfg(debug_assertions)]
+        assert!(std::path::Path::new(&profraw).exists()); // ensure profile data was generated
+
+        index_target_report(cfg, &profraw, &profdata).unwrap();
+        remove_file(&profraw).expect("removing raw profile data");
+
+        //let cov = check_report_coverage(cfg, &profdata).unwrap();
+        let report: ReportFile = read_report(cfg, &profdata)?;
+        remove_file(&profdata).expect("removing coverage profile data");
+
+        let mut n: u64 = 0;
+        for file in report.files {
+            //for file in report.functions {
+            for _branch in file.branches {
+                //for _branch in file.regions {
+                n += 1
+            }
+        }
+        Ok(n)
     }
 }
 
@@ -499,8 +553,10 @@ fn exec_target(cfg: &Config, raw_profile_filepath: &str, input: &[u8]) -> ExecRe
 
 /// execute the target program with test input sent to stdin
 fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
-    set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
+    #[cfg(debug_assertions)]
+    assert!(!std::path::Path::new(&raw_profile_filepath).exists()); // ensure profile data was cleaned up last time
     let mut profile_target = Command::new("./a.out")
+        .env("LLVM_PROFILE_FILE", raw_profile_filepath)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -527,17 +583,21 @@ fn exec_target_stdin(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Out
 
 /// execute the target program with test input sent via an input file
 fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
-    let mut f = BufWriter::new(std::fs::File::create("input.mutation").unwrap());
+    let fname = format!("{}.mutation", std::thread::current().name().unwrap());
+    let mut f = BufWriter::new(std::fs::File::create(&fname).unwrap());
     f.write_all(input).unwrap();
 
     std::mem::drop(f);
 
-    set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
     let profile_target = Command::new("./a.out")
+        .env("LLVM_PROFILE_FILE", raw_profile_filepath)
+        .args(["--mutation-file", &fname])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let result = profile_target.wait_with_output();
+
+    remove_file(fname).expect("removing input mutation file");
 
     if let Ok(res) = result {
         ExecResult::Ok(res)
@@ -547,23 +607,10 @@ fn exec_target_filein(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Ou
 }
 
 /// execute the target program with test input sent via program arguments
-pub fn exec_target_args(
-    raw_profile_filepath: &str,
-    //cmd_args: &[String; 6],
-    input: &[u8],
-) -> ExecResult<Output> {
-    set_var("LLVM_PROFILE_FILE", raw_profile_filepath);
+pub fn exec_target_args(raw_profile_filepath: &str, input: &[u8]) -> ExecResult<Output> {
+    let mut args: Vec<Vec<_>> = vec![];
+    let mut cursor: Vec<_> = Vec::new();
 
-    //let cmd_args = String::from_utf8_lossy(input.clone());
-    #[cfg(not(target_os = "windows"))]
-    let mut args: Vec<Vec<u8>> = vec![];
-    #[cfg(target_os = "windows")]
-    let mut args: Vec<Vec<u16>> = vec![];
-
-    #[cfg(not(target_os = "windows"))]
-    let mut cursor: Vec<u8> = Vec::new();
-    #[cfg(target_os = "windows")]
-    let mut cursor: Vec<u16> = Vec::new();
     for b in input {
         if b == &b'\0' {
             args.push(cursor);
@@ -584,6 +631,7 @@ pub fn exec_target_args(
     let os_args: Vec<OsString> = args.iter().map(|a| OsStringExt::from_wide(a)).collect();
 
     let profile_target = Command::new("./a.out")
+        .env("LLVM_PROFILE_FILE", raw_profile_filepath)
         .args(os_args)
         .stderr(Stdio::piped())
         .spawn()
@@ -599,7 +647,7 @@ pub fn exec_target_args(
 }
 
 /// convert raw profile data to an indexed file format
-pub fn index_target_report(
+fn index_target_report(
     cfg: &Config,
     raw_profile_filepath: &str,
     profile_filepath: &str,
@@ -614,10 +662,13 @@ pub fn index_target_report(
     ];
     let prof_merge_result = Command::new(&cfg.llvm_profdata_path)
         .args(prof_merge_args)
-        .output()?;
+        .output()
+        .expect("merge profile command");
     if !prof_merge_result.status.success() {
-        remove_file(raw_profile_filepath).expect("removing profraw");
-        panic!("\n{}", String::from_utf8_lossy(&prof_merge_result.stderr))
+        panic!(
+            "Could not merge profile data. {}",
+            String::from_utf8_lossy(&prof_merge_result.stderr)
+        )
     }
     Ok(())
 }
@@ -627,7 +678,7 @@ fn read_report(
     cfg: &Config,
     profile_filepath: &str,
 ) -> Result<ReportFile, Box<dyn std::error::Error>> {
-    let mut prof_report_args: Vec<String> = vec!["export", "--instr-profile", profile_filepath]
+    let mut prof_report_args: Vec<String> = ["export", "--instr-profile", profile_filepath]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -679,22 +730,4 @@ pub fn check_report_coverage(
     }
 
     Ok(coverageset)
-}
-
-/// count the number of code branches in the coverage file
-pub fn count_branch_total(
-    cfg: &Config,
-    profile_filepath: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let report: ReportFile = read_report(cfg, profile_filepath)?;
-
-    let mut n: u64 = 0;
-    for file in report.files {
-        //for file in report.functions {
-        for _branch in file.branches {
-            //for _branch in file.regions {
-            n += 1
-        }
-    }
-    Ok(n)
 }

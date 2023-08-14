@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use ecfuzz::corpus::{Corpus, CorpusInput};
-use ecfuzz::execute::{count_branch_total, Config, Exec, ExecResult};
+use ecfuzz::execute::{Config, Exec, ExecResult};
 use ecfuzz::mutator::Mutation;
 
 #[repr(C)]
@@ -21,8 +21,6 @@ struct MyTargetInput {
 
 struct MyFuzzEngine {
     mutation_engine: Mutation,
-    //firstname_seeds: Vec<Vec<u8>>,
-    //lastname_seeds: Vec<Vec<u8>>,
     firstname_seeds: Corpus,
     lastname_seeds: Corpus,
     pub data: MyTargetInput,
@@ -58,8 +56,6 @@ impl MyTargetInput {
             data: bytes,
             coverage,
             lifetime: 0,
-            //file_stem: PathBuf::from("MyCustomInput"),
-            //file_ext: PathBuf::from("mutation"),
         }
     }
 
@@ -105,21 +101,11 @@ impl MyFuzzEngine {
         let multiplier = Some(0.01);
         let dict_path: Option<PathBuf> = None;
 
-        //let firstnames = Corpus::load_corpus_file(&PathBuf::from(
-        //    "examples/lib_custom_fuzzer/input/firstname.dict",
-        //))
-        //.expect("loading firstname dict")
-        //    .0;
         let firstnames = Corpus::load(&PathBuf::from(
             "examples/lib_custom_fuzzer/input/firstname.dict",
         ))
         .expect("loading first names dict");
 
-        //let lastnames = Corpus::load_corpus_file(&PathBuf::from(
-        //    "examples/lib_custom_fuzzer/input/lastname.dict",
-        //))
-        //.expect("loading lastname dict")
-        //.0;
         let lastnames = Corpus::load(&PathBuf::from(
             "examples/lib_custom_fuzzer/input/lastname.dict",
         ))
@@ -252,10 +238,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("seeding: {:?}", &seed);
     cov_corpus.add_and_distill_corpus(seed.serialize(HashSet::new()));
 
-    // coverage profile paths
-    let profraw = "output/custom1.profraw";
-    let profdata = "output/custom1.profdata";
-
     let mut out = stdout().lock();
 
     let mut timer_start = Instant::now();
@@ -279,17 +261,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             lifetime: cov_corpus.inputs[idx].lifetime,
         };
 
-        // run the program with mutated inputs, log crashes to crash corpus
-        let (entry, output) = Exec::trial(
-            &cfg,
-            profraw,
-            profdata,
-            //&mutated.clone().serialize(HashSet::default()).data,
-            &mutation_trial,
-            //PathBuf::new(),
-            //PathBuf::new(),
-            0,
-        );
+        // run the program with mutated inputs
+        let (entry, output) = Exec::trial(&cfg, &mutation_trial, 0);
 
         let output = match output {
             ExecResult::Ok(o) => o,
@@ -312,9 +285,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // log some status messages every 100 execs
         if i % cfg.iter_check == 0 && i > 0 {
-            let branch_count = count_branch_total(&cfg, profdata)?;
+            //let branch_count = count_branch_total(&cfg, profdata)?;
             let status_msg = format!(
-                "\r{:0>3} {:0>3} {:0>4}  {: >10}  {: >10}\t{: >10}  branches: {}/{}  exec/s {:.2}  i: {}",
+                //"\r{:0>3} {:0>3} {:0>4}  {: >10}  {: >10}\t{: >10}  branches: {}/{}  exec/s {:.2}  i: {}",
+                "\r{:0>3} {:0>3} {:0>4}  {: >10}  {: >10}\t{: >10}  branches: {}  exec/s {:.2}  i: {}",
                 &mutated.num1,
                 &mutated.num2,
                 &mutated.num3,
@@ -322,7 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 String::from_utf8_lossy(&mutated.str2.as_bytes().to_vec()),
                 String::from_utf8_lossy(&mutated.str3.as_bytes().to_vec()),
                 cov_corpus.total_coverage.len(),
-                branch_count,
+                //branch_count,
                 cfg.iter_check as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
                 i
                 );
