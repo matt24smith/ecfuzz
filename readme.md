@@ -68,11 +68,11 @@ ecfuzz \
     --target ./examples/cli/fuzz_target.c \
     --corpus ./examples/cli/input/corpus \
     --dictionary-path ./examples/cli/input/sample.dict \
-    --seed 000 \
+    --seed 0001 \
     --iterations 5000
 ```
 
-Initializing the fuzzing engine with seed ``000`` finds both bugs in ``fuzz_target.c`` after 4628 attempts.
+Initializing the fuzzing engine with seed ``0001`` finds both bugs in ``fuzz_target.c`` after 4705 attempts.
 Results will be deterministic as long as the corpus, dictionary, and seed remain unchanged.
 Mutations will be logged to the same directory as the ``corpus`` file.
 

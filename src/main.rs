@@ -20,6 +20,7 @@ const FUZZING_QUEUE_SIZE: usize = 64;
 
 const _WHITESPACE: &str = "                                     ";
 
+/// log coverage increases to stdout
 fn log_new_coverage(i: &usize, cov_corpus: &Corpus) {
     println!(
         "\r\x1b[32mNew coverage!\x1b[0m execs: {}  updating inputs...{}{}\n",
@@ -27,6 +28,7 @@ fn log_new_coverage(i: &usize, cov_corpus: &Corpus) {
     );
 }
 
+/// log new crashes to stderr
 fn log_crash_new(stderr: &[u8], i: &usize, crash_corpus: &Corpus) {
     eprintln!(
         "\r{}\x1b[31mNew crash!\x1b[0m execs: {}  updating crash log...{}{}\n",
@@ -37,6 +39,7 @@ fn log_crash_new(stderr: &[u8], i: &usize, crash_corpus: &Corpus) {
     );
 }
 
+/// log known crashes to stderr
 fn log_crash_known(stderr: &[u8], i: &usize, crash_corpus: &Corpus) {
     eprintln!(
         "\r{}\x1b[91mKnown crash!\x1b[0m execs: {}{}\n",
