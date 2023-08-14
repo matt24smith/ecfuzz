@@ -3,7 +3,8 @@ use std::fs::{create_dir, metadata, read, read_dir, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::execute::{Config, Exec};
+use crate::config::Config;
+use crate::execute::Exec;
 
 /// each test input sent to the target program contains the byte vector
 /// to be tested, as well as the resulting branch coverage set and some metadata
