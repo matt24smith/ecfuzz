@@ -11,14 +11,15 @@ use std::time::Instant;
 
 use rayon::ThreadPoolBuilder;
 
+use ecfuzz::config::Config;
 use ecfuzz::corpus::{Corpus, CorpusInput};
-use ecfuzz::execute::{Config, Exec, ExecResult};
+use ecfuzz::execute::{Exec, ExecResult};
 use ecfuzz::mutator::Mutation;
 
 /// number of mutations that will be queued for fuzzing before checking results
 const FUZZING_QUEUE_SIZE: usize = 64;
 
-const _WHITESPACE: &str = "                                     ";
+const _WHITESPACE: &str = "                                        ";
 
 /// log coverage increases to stdout
 fn log_new_coverage(i: &usize, cov_corpus: &Corpus) {
@@ -31,21 +32,21 @@ fn log_new_coverage(i: &usize, cov_corpus: &Corpus) {
 /// log new crashes to stderr
 fn log_crash_new(stderr: &[u8], i: &usize, crash_corpus: &Corpus) {
     eprintln!(
-        "\r{}\x1b[31mNew crash!\x1b[0m execs: {}  updating crash log...{}{}\n",
-        String::from_utf8_lossy(stderr),
+        "\r\x1b[31mNew crash!\x1b[0m execs: {}  updating crash log...{}{}\n{}",
         i,
         _WHITESPACE,
-        &crash_corpus
+        &crash_corpus,
+        String::from_utf8_lossy(stderr)
     );
 }
 
 /// log known crashes to stderr
 fn log_crash_known(stderr: &[u8], i: &usize, crash_corpus: &Corpus) {
     eprintln!(
-        "\r{}\x1b[91mKnown crash!\x1b[0m execs: {}{}\n",
-        String::from_utf8_lossy(stderr),
+        "\r\x1b[91mKnown crash!\x1b[0m execs: {}{}\n{}",
         i,
-        crash_corpus
+        crash_corpus,
+        String::from_utf8_lossy(stderr),
     );
 }
 
@@ -138,9 +139,9 @@ pub fn _main_loop(
 
     let mut timer_start = Instant::now();
 
-    for i in 0..cfg.iterations + (FUZZING_QUEUE_SIZE * 2) {
+    for i in 0..cfg.iterations + FUZZING_QUEUE_SIZE {
         // mutate the input
-        if i < cfg.iterations {
+        if i < cfg.iterations - FUZZING_QUEUE_SIZE {
             let idx = mutation.hashfunc() % cov_corpus.inputs.len();
             mutation.data = cov_corpus.inputs[idx].data.clone();
             mutation.mutate();
@@ -170,20 +171,18 @@ pub fn _main_loop(
         // fuzz jobs may be completed by parallel workers out of order
         // add finished results to a HashMap, and retrieve the latest
         // result from the map at an offset greater than the number of workers
-        if i <= cfg.iterations + FUZZING_QUEUE_SIZE {
+        if i <= cfg.iterations {
             let (n, corpus_entry_unordered, result_unordered) = receiver.recv()?;
             finished_map.insert(n, (corpus_entry_unordered, result_unordered));
         }
 
         // allow some completed fuzz jobs to gather in the finished queue
-        if i < (FUZZING_QUEUE_SIZE * 2) {
+        if i < FUZZING_QUEUE_SIZE * 2 {
             continue;
         }
 
         // get completed fuzz jobs starting at the earliest index
-        let (corpus_entry, result) = finished_map
-            .remove(&(i - (FUZZING_QUEUE_SIZE * 2)))
-            .expect("getting ordered results");
+        let (corpus_entry, result) = finished_map.remove(&(i - FUZZING_QUEUE_SIZE * 2)).unwrap();
 
         handle_fuzzed_result(
             corpus_entry,
