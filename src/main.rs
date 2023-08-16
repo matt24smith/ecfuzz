@@ -17,35 +17,32 @@ use ecfuzz::execute::{Exec, ExecResult};
 use ecfuzz::mutator::Mutation;
 
 /// number of mutations that will be queued for fuzzing before checking results
-const FUZZING_QUEUE_SIZE: usize = 64;
-
-const _WHITESPACE: &str = "                                        ";
+const FUZZING_QUEUE_SIZE: usize = 256;
 
 /// log coverage increases to stdout
 fn log_new_coverage(i: &usize, cov_corpus: &Corpus) {
     println!(
-        "\r\x1b[32mNew coverage!\x1b[0m execs: {}  updating inputs...{}{}\n",
-        i, _WHITESPACE, cov_corpus
+        "\r\x1b[32mNew coverage!\x1b[0m execs: {}  updating inputs... {:<50}{}\n",
+        i, "", cov_corpus
     );
 }
 
 /// log new crashes to stderr
 fn log_crash_new(stderr: &[u8], i: &usize, crash_corpus: &Corpus) {
     eprintln!(
-        "\r\x1b[31mNew crash!\x1b[0m execs: {}  updating crash log...{}{}\n{}",
+        "\r\x1b[31mNew crash!\x1b[0m execs: {}  updating crash log...{:<50}{}\n{}",
         i,
-        _WHITESPACE,
+        "",
         &crash_corpus,
         String::from_utf8_lossy(stderr)
     );
 }
 
 /// log known crashes to stderr
-fn log_crash_known(stderr: &[u8], i: &usize, crash_corpus: &Corpus) {
+fn log_crash_known(stderr: &[u8], i: &usize, _crash_corpus: &Corpus) {
     eprintln!(
-        "\r\x1b[91mKnown crash!\x1b[0m execs: {}{}\n{}",
+        "\r\x1b[91mKnown crash!\x1b[0m execs: {:<80}\n{}",
         i,
-        crash_corpus,
         String::from_utf8_lossy(stderr),
     );
 }
@@ -111,13 +108,13 @@ fn handle_fuzzed_result(
 /// send input to target, read the coverage resulting from the input, and
 /// update the corpus with inputs yielding new coverage
 pub fn _main_loop(
-    cfg: &Config,
+    exec: Exec,
     cov_corpus: &mut Corpus,
     mutation: &mut Mutation,
 ) -> Result<(), Box<dyn Error>> {
     // crashlog
     let mut crash_corpus = Corpus::new();
-    let branch_count = Exec::count_branch_total(cfg)?;
+    let branch_count = exec.count_branch_total()?;
     let outdir = PathBuf::from("output/mutations");
     let crashdir = PathBuf::from("output/crashes");
     create_dir(&outdir).unwrap_or_default();
@@ -130,7 +127,7 @@ pub fn _main_loop(
         .num_threads(num_cpus)
         .build()
         .unwrap();
-    assert!(FUZZING_QUEUE_SIZE >= num_cpus);
+    assert!(num_cpus <= FUZZING_QUEUE_SIZE / 4);
 
     // store finished fuzzing jobs here in the order they finish
     // this allows retrieval of jobs in a deterministic order
@@ -138,10 +135,11 @@ pub fn _main_loop(
         HashMap::with_capacity(FUZZING_QUEUE_SIZE);
 
     let mut timer_start = Instant::now();
+    let mut status: String = String::default();
 
-    for i in 0..cfg.iterations + FUZZING_QUEUE_SIZE {
+    for i in 0..exec.cfg.iterations + FUZZING_QUEUE_SIZE {
         // mutate the input
-        if i < cfg.iterations - FUZZING_QUEUE_SIZE {
+        if i < exec.cfg.iterations - FUZZING_QUEUE_SIZE {
             let idx = mutation.hashfunc() % cov_corpus.inputs.len();
             mutation.data = cov_corpus.inputs[idx].data.clone();
             mutation.mutate();
@@ -154,9 +152,9 @@ pub fn _main_loop(
 
             let lifetime = cov_corpus.inputs[idx].lifetime;
             let sender = sender.clone();
-            let cfg2 = cfg.clone();
+            let exec2 = exec.clone();
             pool.spawn_fifo(move || {
-                let (corpus_entry, result) = Exec::trial(&cfg2, &mutation_trial, lifetime);
+                let (corpus_entry, result) = exec2.trial(&mutation_trial, lifetime);
                 sender
                     .send((i, corpus_entry, result))
                     .expect("sending results from worker");
@@ -171,7 +169,7 @@ pub fn _main_loop(
         // fuzz jobs may be completed by parallel workers out of order
         // add finished results to a HashMap, and retrieve the latest
         // result from the map at an offset greater than the number of workers
-        if i <= cfg.iterations {
+        if i <= exec.cfg.iterations {
             let (n, corpus_entry_unordered, result_unordered) = receiver.recv()?;
             finished_map.insert(n, (corpus_entry_unordered, result_unordered));
         }
@@ -182,7 +180,9 @@ pub fn _main_loop(
         }
 
         // get completed fuzz jobs starting at the earliest index
-        let (corpus_entry, result) = finished_map.remove(&(i - FUZZING_QUEUE_SIZE * 2)).unwrap();
+        let (corpus_entry, result) = finished_map
+            .remove(&(i - FUZZING_QUEUE_SIZE * 2))
+            .expect("retrieving fuzz job results");
 
         handle_fuzzed_result(
             corpus_entry,
@@ -195,22 +195,26 @@ pub fn _main_loop(
         );
 
         // print some status info
-        if i % cfg.iter_check == 0 && 0 < i && i <= cfg.iterations {
-            print!(
-                "\rcoverage: {:>2}/{}  exec/s: {:.2}  inputs: {}  new crashes: {}  i: {:<4}  {}",
+        if i % exec.cfg.iter_check == 0 && 0 < i && i <= exec.cfg.iterations {
+            assert!(timer_start.elapsed().as_millis() > 0);
+            let exec_rate =
+                exec.cfg.iter_check as f64 / (timer_start.elapsed().as_micros() as f64 / 1e6);
+            status = format!(
+                "\rcoverage: {:>2}/{}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8}  {}",
                 cov_corpus.total_coverage.len(),
                 branch_count,
-                cfg.iter_check as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
+                exec_rate,
                 cov_corpus.inputs.len(),
                 crash_corpus.inputs.len(),
                 i,
                 String::from_utf8_lossy(&mutation.data[0..min(32, mutation.data.len())]),
-            );
+                );
+            print!("{}", status);
             stdout().flush().unwrap();
             timer_start = Instant::now();
         }
     }
-    println!();
+    println!("{}", status);
 
     cov_corpus.save(outdir).unwrap();
     crash_corpus.save(crashdir).unwrap();
@@ -223,34 +227,36 @@ pub fn _main_loop(
 /// initialize fuzzing engine and run the main loop
 pub fn main() -> Result<(), Box<dyn Error>> {
     // configure paths and initial state
-    let cfg = Config::parse_args()?;
+    let mut cfg: Config = Config::parse_args()?;
+    cfg.load_env();
     let mut engine = Mutation::with_seed(cfg.dict_path.clone(), cfg.seed.clone(), cfg.multiplier);
     let mut cov_corpus = Corpus::new();
 
     // compile target
-    Exec::initialize(&cfg)?;
+    let executor = Exec::initialize(cfg).expect("preparing execution context");
 
     // coverage profile paths
     println!("seeding...");
 
     // load corpus into memory
-    for filepath in &cfg.corpus_files {
+    for filepath in &executor.cfg.corpus_files {
         cov_corpus.append(Corpus::load(filepath).expect("reading corpus file"))
     }
-    for filepath in &cfg.corpus_dirs {
+    for filepath in &executor.cfg.corpus_dirs {
         cov_corpus.append(Corpus::load(filepath).expect("reading corpus dir"))
     }
 
     // check initial corpus coverage
-    cov_corpus.initialize(&cfg);
-    let branch_count = Exec::count_branch_total(&cfg)?;
+    cov_corpus.initialize(&executor);
 
     println!(
-        "branches hit by seed corpus: {:?}/{}",
-        cov_corpus.total_coverage, branch_count
+        "branches hit by initial corpus: {}/{}\n{}",
+        cov_corpus.total_coverage.len(),
+        executor.count_branch_total()?,
+        cov_corpus
     );
 
-    _main_loop(&cfg, &mut cov_corpus, &mut engine)?;
+    _main_loop(executor, &mut cov_corpus, &mut engine)?;
 
     Ok(())
 }
