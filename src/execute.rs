@@ -1,9 +1,36 @@
+//! Compiles the target executable with LLVM instrumentation embedded.
+//!
+//! Available sanitizers:
+//!  - linux: `address`, `cfi`, `leak`, `memory`, `safe-stack`, `thread`, `undefined`
+//!  - macos: `address`, `thread`, `undefined`
+//!  - win10: `address`, `undefined`
+//!
+//! Enable sanitizers by setting `CFLAGS` in the environment, e.g.
+//! ```bash
+//! export CFLAGS="-fsanitize=memory,undefined"
+//! ```
+//!
+//! Examples of options that can be passed to the compiler (with clang+tools installed in `/opt/bin`):
+//! ```bash
+//! export CFLAGS="-O3 -mshstk -mllvm -polly -std=c17 -g -fcolor-diagnostics -fuse-ld=lld -L/opt/lib -D_FORTIFY_SOURCE=3 -fstack-protector-all -fcf-protection=full -fsanitize=memory,undefined,cfi -flto -fvisibility=hidden"
+//! ```
+//!
+//! Further reading:
+//! <https://clang.llvm.org/docs/ClangCommandLineReference.html>
+//! <https://developers.redhat.com/articles/2022/06/02/use-compiler-flags-stack-protection-gcc-and-clang>
+
+const CFLAGS_DEFAULTS: &str =
+    "-O3 -mshstk -std=c17 -g -fcolor-diagnostics -fuse-ld=lld -fstack-protector-all";
+// also see:
+// <https://lldb.llvm.org/use/tutorial.html#starting-or-attaching-to-your-program>
+
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::remove_file;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt;
@@ -19,8 +46,9 @@ use crate::config::Config;
 use crate::corpus::CorpusInput;
 use crate::mutator::byte_index;
 
+#[derive(Clone)]
 pub struct Exec {
-    pub cfg: Config,
+    pub cfg: Arc<Config>,
 }
 
 pub enum ExecResult<Output> {
@@ -42,8 +70,8 @@ pub struct ReportFile {
 
 impl Exec {
     /// compile and instrument the target.
-    pub fn initialize(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
-        // ensure cc is clang 14
+    pub fn initialize(cfg: Config) -> Result<Exec, Box<dyn std::error::Error>> {
+        // ensure cc is clang >= v14.0.0
         let check_cc_ver = Command::new(&cfg.cc_path).arg("--version").output()?;
         let cc_ver = String::from_utf8_lossy(&check_cc_ver.stdout);
         println!("{}", cc_ver);
@@ -54,7 +82,7 @@ impl Exec {
             panic!("Requires CC version 14 or higher. Found {}", cc_ver);
         }
 
-        let cflag_var = std::env::var("CFLAGS").unwrap_or_default();
+        let cflag_var = std::env::var("CFLAGS").unwrap_or(CFLAGS_DEFAULTS.to_string());
         println!("CFLAGS={:?}", cflag_var);
         let cflags = cflag_var.split(' ');
 
@@ -64,15 +92,6 @@ impl Exec {
             "a.out",
             "-fprofile-instr-generate",
             "-fcoverage-mapping",
-            // asan - very slow on windows and apple arm64
-            #[cfg(not(any(target_os = "windows", target_arch = "aarch64")))]
-            "-fsanitize=address,undefined",
-            // msan doesn't work at the same time as usan on windows
-            #[cfg(target_os = "windows")]
-            "-fsanitize=undefined",
-            // msan - not supported on apple arm64
-            // #[cfg(not(target_arch = "aarch64"))]
-            //"-fsanitize=memory",
             "-fno-optimize-sibling-calls",
             "-fno-omit-frame-pointer",
             #[cfg(target_arch = "aarch64")]
@@ -112,13 +131,13 @@ impl Exec {
         }
         println!("done compiling");
 
-        Ok(())
+        Ok(Exec { cfg: cfg.into() })
     }
 
     /// execute the target program with a new test input.
     /// records profile data to the output directory.
     pub fn trial(
-        cfg: &Config,
+        &self,
         test_input: &CorpusInput,
         lifetime: u64,
     ) -> (CorpusInput, ExecResult<Output>) {
@@ -134,15 +153,15 @@ impl Exec {
         #[cfg(debug_assertions)]
         assert!(!profraw.exists()); // ensure profile data was cleaned up last time
 
-        let output = exec_target(cfg, &profraw, &test_input.data);
+        let output = exec_target(&self.cfg, &profraw, &test_input.data);
 
         #[cfg(debug_assertions)]
         assert!(profraw.exists()); // ensure profile data was generated
 
-        index_target_report(cfg, &profraw, &profdata).unwrap();
+        index_target_report(&self.cfg, &profraw, &profdata).unwrap();
         remove_file(&profraw).expect("removing raw profile data");
 
-        let cov = check_report_coverage(cfg, &profdata).unwrap();
+        let cov = check_report_coverage(&self.cfg, &profdata).unwrap();
         remove_file(&profdata).expect("removing coverage profile data");
 
         // if the program crashes during execution, code coverage checking may
@@ -166,7 +185,7 @@ impl Exec {
     }
 
     /// count the number of code branches in the coverage file
-    pub fn count_branch_total(cfg: &Config) -> Result<u64, Box<dyn std::error::Error>> {
+    pub fn count_branch_total(&self) -> Result<u64, Box<dyn std::error::Error>> {
         let profraw = PathBuf::from(format!(
             "output/{}.profraw",
             std::thread::current().name().expect("getting thread name"),
@@ -176,12 +195,12 @@ impl Exec {
             std::thread::current().name().expect("getting thread name"),
         ));
 
-        let _output = exec_target(cfg, &profraw, b"");
+        let _output = exec_target(&self.cfg, &profraw, b"");
 
-        index_target_report(cfg, &profraw, &profdata).unwrap();
+        index_target_report(&self.cfg, &profraw, &profdata).unwrap();
         remove_file(profraw).expect("removing raw profile data");
 
-        let report: ReportFile = read_report(cfg, &profdata)?;
+        let report: ReportFile = read_report(&self.cfg, &profdata)?;
         remove_file(profdata).expect("removing coverage profile data");
 
         let mut n: u64 = 0;
@@ -211,8 +230,6 @@ fn exec_target(cfg: &Config, raw_profile_filepath: &PathBuf, input: &[u8]) -> Ex
 
 /// execute the target program with test input sent to stdin
 fn exec_target_stdin(raw_profile_filepath: &PathBuf, input: &[u8]) -> ExecResult<Output> {
-    #[cfg(debug_assertions)]
-    assert!(!std::path::Path::new(&raw_profile_filepath).exists()); // ensure profile data was cleaned up last time
     let mut profile_target = Command::new("./a.out")
         .env("LLVM_PROFILE_FILE", raw_profile_filepath)
         .stdin(Stdio::piped())

@@ -211,14 +211,15 @@ impl MyFuzzEngine {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sets clang compiler and llvm tools paths to default settings
     let mut cfg = Config::defaults();
-    cfg.iter_check = 8;
+    cfg.iter_check = 20;
     cfg.target_path = PathBuf::from("./examples/lib_custom_fuzzer/example.c");
     cfg.iterations = 10_000;
     cfg.objects = vec![PathBuf::from("./a.out")];
     cfg.mutate_args = true;
+    cfg.load_env();
 
     // compile target with instrumentation
-    Exec::initialize(&cfg)?;
+    let exec = Exec::initialize(cfg)?;
 
     // create new mutation engine and corpus, seed the corpus with zeros
     let mut engine = MyFuzzEngine::new();
@@ -242,7 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = stdout().lock();
 
     let mut timer_start = Instant::now();
-    for i in 0..cfg.iterations {
+    for i in 0..exec.cfg.iterations {
         // deserialize mutation inputs stored in the corpus
         let idx = i % cov_corpus.inputs.len();
         let input_raw: CorpusInput = cov_corpus.inputs[idx].clone();
@@ -263,7 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // run the program with mutated inputs
-        let (entry, output) = Exec::trial(&cfg, &mutation_trial, 0);
+        let (entry, output) = exec.trial(&mutation_trial, 0);
 
         let output = match output {
             ExecResult::Ok(o) => o,
@@ -285,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // log some status messages every 100 execs
-        if i % cfg.iter_check == 0 && i > 0 {
+        if i % exec.cfg.iter_check == 0 && i > 0 {
             //let branch_count = count_branch_total(&cfg, profdata)?;
             let status_msg = format!(
                 //"\r{:0>3} {:0>3} {:0>4}  {: >10}  {: >10}\t{: >10}  branches: {}/{}  exec/s {:.2}  i: {}",
@@ -298,7 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 String::from_utf8_lossy(&mutated.str3.as_bytes().to_vec()),
                 cov_corpus.total_coverage.len(),
                 //branch_count,
-                cfg.iter_check as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
+                exec.cfg.iter_check as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
                 i
                 );
             timer_start = Instant::now();
