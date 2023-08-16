@@ -3,14 +3,14 @@
 # ECFuzz
 Evolutionary Coverage-guided Fuzzing engine. 
 Lightweight, multithreaded, fully deterministic. 
-Corpus mutations are managed by a genetic algorithm selecting for maximized code coverage, filtering redundant inputs.
+Mutations are managed by a genetic algorithm selecting for maximized code coverage, filtering redundant inputs.
 A library interface is also provided in addition to the command-line utility. 
 Requires clang 14 (or newer) and llvm tools.
 
 
 ## Quick Start
-Install clang and llvm tools with your preferred package manager.
-Alternatively, download an installer for clang+LLVM or build from source: <https://github.com/llvm/llvm-project/releases/>
+Clang and llvm tools can be installed with your preferred package manager.
+For the best fuzzing performance, refer to the section below on [Installing clang and LLVM from Source](#install-clang-and-llvm-from-source)
 
 Install ``ecfuzz`` with cargo, and run it using the command line interface. 
 Setting the ``--mutate-stdin`` flag generates a single mutation from standard input without measuring code coverage. 
@@ -72,43 +72,43 @@ ecfuzz \
     --target ./examples/cli/fuzz_target.c \
     --corpus ./examples/cli/input/corpus \
     --dictionary-path ./examples/cli/input/sample.dict \
-    --seed 0001 \
-    --iterations 5000
+    --seed 0 \
+    --iterations 10000
 ```
 
-Initializing the fuzzing engine with seed ``0001`` finds both bugs in ``fuzz_target.c`` after 4705 attempts.
-Results will be deterministic as long as the corpus, dictionary, and seed remain unchanged.
-Mutations will be logged to the same directory as the ``corpus`` file.
+Results will be deterministic as long as the inputs (and ecfuzz version) remain unchanged.
+Sanitizer output and other target error messages will be written to stderr.
 
+Example output (sanitizers disabled):
 ```text
 ...
-branch hits: 10/12  exec/s: 63.21  inputs: 2  i: 4600  ABCDE0001000000
-fuzz_target.c:12:15: runtime error: applying zero offset to null pointer       
-SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior fuzz_target.c:12:15 in 
-fuzz_target.c:12:15: runtime error: store to null pointer of type 'char'
-SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior fuzz_target.c:12:15 in
 
-  This frame has 1 object(s):
-    [32, 288) 'str1' <== Memory access at offset 32 is inside this variable
-
-SUMMARY: AddressSanitizer: unknown-crash (/home/matt/ecfuzz/a.out+0x11a322) (BuildId: d47f3011239226931362fe3a8999c8bc129a9a52) in do_comparison
-Shadow bytes around the buggy address:
-  0x10005a40c570: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-  0x10005a40c580: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-=>0x10005a40c590: f1 f1 f1 f1[00]00 00 00 00 00 00 00 00 00 00 00
-  0x10005a40c5a0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-  0x10005a40c5b0: 00 00 00 00 f3 f3 f3 f3 f3 f3 f3 f3 00 00 00 00
-Shadow byte legend (one shadow byte represents 8 application bytes):
-  Addressable:             00 
-  Stack left redzone:      f1
-  Stack mid redzone:       f2
-  Stack right redzone:     f3
-...
-crashing path A...
-New crash! execs: 4628  crash log:
+branches hit by initial corpus: 0/12
+New coverage! execs: 554  updating inputs...                                                 
   Corpus { inputs: [
-    CorpusInput:  { stem: "corpus", coverage: {}, lifetime: 7, preview: "ABCDEF\r00000000\r" }],
-  Total coverage: {} }
+    CorpusInput:  { coverage: {7, 6}, lifetime: 1, preview: "GH0000000000000" }], 
+  Total coverage: {6, 7} }
+
+...
+
+New coverage! execs: 4161  updating inputs...                                                 
+  Corpus { inputs: [
+    CorpusInput:  { coverage: {4, 1, 0, 3, 2}, lifetime: 4, preview: "ABCDE0000000000" }, 
+    CorpusInput:  { coverage: {8, 7, 6}, lifetime: 2, preview: "GHI000000000000" }], 
+  Total coverage: {4, 3, 6, 8, 7, 0, 1, 2} }
+
+New crash! execs: 5416  updating crash log...                                                 
+  Corpus { inputs: [
+    CorpusInput:  { coverage: {1, 6, 4, 2, 0, 5, 3}, lifetime: 5, preview: "ABCDEF000000000" }], 
+  Total coverage: {5, 3, 4, 1, 6, 2, 0} }
+crashing path A...
+
+Known crash! execs: 5793                                                                        
+crashing path A...
+
+...
+
+coverage: 10/12  exec/s: 2222  corpus size: 2  unique crashes: 2  i: 10000  GH�JK0000000000
 ```
 
 ### Custom Fuzzer using ECFuzz Library
@@ -118,4 +118,43 @@ Another example shows implementation of a custom fuzzer for ``./examples/lib_cus
 cargo run --example=custom_fuzzer
 ```
 
+## Install Clang and LLVM from source
 
+Building the clang compiler from the latest source code instead of installing with a package manager may improve fuzzing performance significantly.
+The recommended configuration to build and install clang and LLVM tools to `/opt/bin/` using the [Ninja build system](https://ninja-build.org/) is as follows:
+
+```bash
+# tested with clang v18.0.0
+git clone https://github.com/llvm/llvm-project.git
+cd llvm-project
+
+# configure the build
+cmake -S llvm -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE="Release" \
+  -DCMAKE_INSTALL_PREFIX="/opt" \
+  -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld;lldb;polly;compiler-rt" \ 
+  -DLLVM_ENABLE_RUNTIMES=all \
+  -DLLVM_PARALLEL_LINK_JOBS=1 \
+  -DLLVM_USE_LINKER="lld"
+
+# build and install
+ninja -C build check-llvm
+sudo -E ninja -C build install
+```
+
+Then update the environment:
+```bash
+# install paths
+export ECFUZZ_CC_PATH="/opt/bin/clang"
+export ECFUZZ_LLVM_COV_PATH="/opt/bin/llvm-cov"
+export ECFUZZ_LLVM_PROFDATA_PATH="/opt/bin/llvm-profdata"
+
+# build options
+export CFLAGS="-O3 -mllvm -polly -std=c17 -g -fcolor-diagnostics -fuse-ld=lld -fsanitize=undefined,address"
+```
+
+For more info on building clang and LLVM from source, see:
+<https://llvm.org/docs/GettingStarted.html#getting-the-source-code-and-building-llvm>
+
+For more info on ensuring determistic output from the clang compiler, see: 
+<https://blog.llvm.org/2019/11/deterministic-builds-with-clang-and-lld.html>,
