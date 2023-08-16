@@ -1,9 +1,10 @@
+//! Maintain corpus inputs as they evolve with each generation of mutations
+
 use std::collections::HashSet;
-use std::fs::{create_dir, metadata, read, read_dir, File};
+use std::fs::{metadata, read, read_dir, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
 use crate::execute::Exec;
 
 /// each test input sent to the target program contains the byte vector
@@ -30,10 +31,16 @@ impl CorpusInput {
             lifetime: 0,
         }
     }
+
     /// Serialize the test input to an output directory for logging.
     /// Two files will be created: a .mutation file containing the mutated
     /// input, and a .coverage file containing the set of code branches hit
-    fn serialize(&self, output_dir: &Path, output_name: &str) -> Result<(), std::io::Error> {
+    fn serialize(
+        &self,
+        mutation_dir: &Path,
+        coverage_dir: &Path,
+        output_name: &str,
+    ) -> Result<(), std::io::Error> {
         let mut hits = self.coverage.clone().drain().collect::<Vec<u64>>();
         hits.sort();
         let hit_str = hits
@@ -42,17 +49,16 @@ impl CorpusInput {
             .collect::<Vec<String>>()
             .join("\n");
 
-        assert!(output_dir.is_dir());
+        #[cfg(debug_assertions)]
+        assert!(mutation_dir.is_dir());
+        #[cfg(debug_assertions)]
+        assert!(coverage_dir.is_dir());
 
-        let mut fpath = output_dir.to_path_buf();
-        fpath = fpath.join(output_name);
+        let mut fpath = mutation_dir.join(output_name);
         fpath.set_extension("mutation");
 
-        let mut cov_path = fpath.clone();
+        let mut cov_path = coverage_dir.join(output_name);
         cov_path.set_extension("coverage");
-
-        #[cfg(debug_assertions)]
-        println!("writing to {}", fpath.to_str().unwrap(),);
 
         File::create(fpath)
             .expect("creating fpath")
@@ -175,33 +181,31 @@ impl Corpus {
     /// append corpus entries to the corpus file.
     /// a .coverage file will also be created with branch coverage info
     pub fn save(&self, output_dir: PathBuf) -> std::io::Result<()> {
-        if !output_dir.exists() {
-            std::fs::create_dir_all(&output_dir).unwrap();
+        let mutations: PathBuf = output_dir.join("mutation");
+        let coverages: PathBuf = output_dir.join("coverage");
+
+        for dir in [&output_dir, &mutations, &coverages] {
+            if !dir.exists() {
+                std::fs::create_dir_all(dir).expect("creating dir");
+            }
         }
+
+        println!("\rsaving to {:#?} ... {:<70}", output_dir, "");
 
         for (i, input) in self.inputs.iter().enumerate() {
             input
-                .serialize(&output_dir, format!("{}", i).as_str())
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "serializing {} as file in directory {}",
-                        i,
-                        output_dir.as_path().to_str().unwrap()
-                    )
-                });
+                .serialize(&mutations, &coverages, format!("{}", i).as_str())
+                .expect("saving corpus to directory");
         }
 
         Ok(())
     }
 
     /// update code coverage metrics for corpus inputs without mutating
-    pub fn initialize(&mut self, cfg: &Config) {
-        let output_dir = PathBuf::from("output");
-        if !output_dir.is_dir() {
-            create_dir(output_dir).expect("creating output directory");
-        };
-        for input in &self.inputs {
-            let (input_updated, _crashed) = Exec::trial(cfg, input, input.lifetime + 1);
+    pub fn initialize(&mut self, executor: &Exec) {
+        for input in &mut self.inputs {
+            let (input_updated, _crashed) = executor.trial(input, input.lifetime + 1);
+            input.coverage = input_updated.coverage.clone();
             self.total_coverage.extend(&input_updated.coverage);
         }
     }
@@ -285,9 +289,9 @@ mod tests {
         cfg.target_path = PathBuf::from("./examples/cli/fuzz_target.c");
 
         // compile target with instrumentation
-        Exec::initialize(&cfg).unwrap();
+        let exec = Exec::initialize(cfg).unwrap();
 
         // check coverage of initial inputs
-        corpus.initialize(&cfg);
+        corpus.initialize(&exec);
     }
 }
