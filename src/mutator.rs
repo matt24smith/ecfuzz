@@ -1,3 +1,4 @@
+//! Mutation engine can be run in 'single shot' mode to mutate data from stdin
 //!
 //!Options for ``ecfuzz --mutate-stdin``
 //!```text
@@ -9,14 +10,17 @@
 //!                                dictionary value insertion, and tokenized
 //!                                dictionary replacement
 //!
-//!  -s, --seed <seed>             Optionally seed the mutation
+//!  -s, --seed <seed>             Optionally seed the mutation engine with a given value
+//!
+//!  -m, --multiplier <N>          Mutations per byte. Default 0.01
 //!
 //!Example:
 //!
-//!  echo 'Hello world!' | ecfuzz --mutate-stdin
-//!  echo 'Hello world!' | ecfuzz --mutate-stdin --dictionary-path input/sample.dict --seed 000
+//!  echo 'Hello world!' | ecfuzz --mutate-stdin --seed 0
+//!
 //!```
 
+use std::cmp::max;
 use std::collections::btree_map::Entry::Vacant;
 use std::collections::BTreeMap;
 use std::fs::read;
@@ -57,7 +61,7 @@ pub struct Mutation {
     pub dict: Option<BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
     hasher: Xxh3,
     hash_seed: [u8; 4],
-    mutators: Vec<for<'r> fn(&'r mut Mutation)>,
+    mutators: Vec<for<'r> fn(&'r mut Mutation) -> Result<(), ()>>,
     multiplier: f64,
 }
 
@@ -228,80 +232,41 @@ impl Mutation {
 
     /// magic number mutation
     /// splices data with random magic value
-    pub fn mutate_magic(&mut self) {
-        //let mut count = (self.data.len() as f64 * self.multiplier) as usize;
-        let mut count = (self.data.len() as f64 * 10000.0 / (10000.0 / self.multiplier)) as usize;
-
-        if count == 0 {
-            count = 1;
-        };
-
-        #[cfg(debug_assertions)]
-        assert!(count > 0);
-
-        for _ in 0..count {
-            let (mut n_size, n) = self.magic_char();
-            if n_size > self.data.len() {
-                n_size = self.data.len();
-            }
-            let mut sz: usize = self.data.len() - n_size;
-            if sz == 0 {
-                sz = 1
-            }
-            #[cfg(debug_assertions)]
-            assert!(sz > 0);
-            let idx = self.hashfunc() % sz;
-            self.data.splice(idx..idx + n_size, n);
+    pub fn mutate_magic(&mut self) -> Result<(), ()> {
+        let (mut n_size, n) = self.magic_char();
+        if n_size > self.data.len() {
+            n_size = self.data.len();
         }
+        let mut sz: usize = self.data.len() - n_size;
+        if sz == 0 {
+            sz = 1
+        }
+        #[cfg(debug_assertions)]
+        assert!(sz > 0);
+        let idx = self.hashfunc() % sz;
+        self.data.splice(idx..idx + n_size, n);
+        Ok(())
     }
 
     /// XOR mutation and bitshift
-    pub fn mutate_bits(&mut self) {
-        let mut count = (self.data.len() as f64 * 8.0 * self.multiplier) as usize;
-
-        if count == 0 {
-            count = 1;
-        };
-
-        let maxidx = self.data.len();
-
-        #[cfg(debug_assertions)]
-        assert!(count > 0);
-        #[cfg(debug_assertions)]
-        assert!(maxidx > 0);
-
-        for _ in 0..count {
-            let bit = self.hashfunc() % (maxidx * 8);
-            let idx_bit: usize = bit % 8;
-            let idx_byte: usize = bit / 8;
-            self.data[idx_byte] ^= 1 << idx_bit;
-        }
+    pub fn mutate_bits(&mut self) -> Result<(), ()> {
+        let bit = self.hashfunc() % (self.data.len() * 8);
+        let idx_bit: usize = bit % 8;
+        let idx_byte: usize = bit / 8;
+        self.data[idx_byte] ^= 1 << idx_bit;
+        Ok(())
     }
 
     /// replace randomly selected bytes with random data of equivalent length
-    pub fn mutate_bytes(&mut self) {
-        let mut count = (self.data.len() as f64 * self.multiplier) as usize;
-
-        if count == 0 {
-            count = 1;
-        };
-        let maxidx: usize = self.data.len();
-
-        #[cfg(debug_assertions)]
-        assert!(count > 0);
-        #[cfg(debug_assertions)]
-        assert!(maxidx > 0);
-
-        let dataidx = self.hashfunc() % maxidx;
-        for _ in 0..count {
-            self.data[dataidx] = (self.hashfunc() % 256) as u8;
-        }
+    pub fn mutate_bytes(&mut self) -> Result<(), ()> {
+        let dataidx = self.hashfunc() % self.data.len();
+        self.data[dataidx] = (self.hashfunc() % 256) as u8;
+        Ok(())
     }
 
     /// random dictionary insertion
-    pub fn mutate_dictionary(&mut self) {
-        let hash = self.hashfunc();
-        let validx = hash
+    pub fn mutate_dictionary(&mut self) -> Result<(), ()> {
+        let val_idx = self.hashfunc()
             % self
                 .dict
                 .as_ref()
@@ -309,18 +274,20 @@ impl Mutation {
                 .get(&b"".to_vec())
                 .unwrap()
                 .len();
-        let val: Vec<u8> = self.dict.as_ref().unwrap().get(&b"".to_vec()).unwrap()[validx].to_vec();
+        let val: Vec<u8> =
+            self.dict.as_ref().unwrap().get(&b"".to_vec()).unwrap()[val_idx].to_vec();
         //let idx = self.hashfunc() % ((self.data.len() - val.len()) - 1);
         if self.data.len() > val.len() {
             let idx = self.hashfunc() % (self.data.len() - val.len());
             self.data.splice(idx..idx + val.len(), val);
         } else {
             self.data = val;
-        }
+        };
+        Ok(())
     }
 
     /// tokenized dictionary replacement
-    pub fn mutate_dictionary_replacement(&mut self) {
+    pub fn mutate_dictionary_replacement(&mut self) -> Result<(), ()> {
         let mut keys = self
             .dict
             .as_ref()
@@ -330,6 +297,8 @@ impl Mutation {
             .cloned()
             .collect::<Vec<Vec<u8>>>();
         keys.sort();
+        let split_idx = self.hashfunc() % keys.len();
+        keys = [&keys[split_idx..keys.len()], &keys[0..split_idx]].concat();
         for key in keys {
             let keyidx = self.hashfunc() % self.dict.as_ref().unwrap().get(&key).unwrap().len();
             let val: Vec<u8> = self.dict.as_ref().unwrap().get(&key).unwrap()[keyidx].to_vec();
@@ -339,18 +308,24 @@ impl Mutation {
             }
             let idx = indices[self.hashfunc() % indices.len()];
             self.data.splice(idx..(idx + key.len()), val);
-            return;
+            return Ok(());
         }
-        panic!(
-            "no matching tokens in corpus for {}",
-            String::from_utf8_lossy(&self.data)
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "no matching tokens in corpus for {}! skipping...",
+            String::from_utf8_lossy(&self.data),
         );
+        Err(())
     }
 
     /// applies a random mutator to input
     pub fn mutate(&mut self) {
-        let hash: usize = self.hashfunc() % self.mutators.len();
-        self.mutators[hash](self);
+        for _mutate in 0..max(1, (self.data.len() as f64 * self.multiplier) as usize) {
+            let mut hash: usize = self.hashfunc() % self.mutators.len();
+            while self.mutators[hash](self).is_err() {
+                hash = self.hashfunc() % self.mutators.len();
+            }
+        }
     }
 }
 
@@ -436,17 +411,17 @@ mod tests {
     }
 
     #[test]
-    fn test_mutations() {
+    fn test_mutations() -> Result<(), ()> {
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
 
         let mut mutation = Mutation::new(None, None);
         mutation.data = test;
 
-        mutation.mutate_magic();
+        mutation.mutate_magic()?;
         let magicmutated = mutation.data.clone();
-        mutation.mutate_bits();
+        mutation.mutate_bits()?;
         let bitmutated = mutation.data.clone();
-        mutation.mutate_bytes();
+        mutation.mutate_bytes()?;
         let randommutated = mutation.data.clone();
         mutation.mutate();
         let anymutated = mutation.data.clone();
@@ -473,6 +448,8 @@ mod tests {
         f.write_all(&bitmutated).unwrap();
         f.write_all(&randommutated).unwrap();
         f.write_all(&anymutated).unwrap();
+
+        Ok(())
     }
 
     #[test]
@@ -486,16 +463,17 @@ mod tests {
     }
 
     #[test]
-    fn test_dict() {
+    fn test_dict() -> Result<(), ()> {
         let dictpath = PathBuf::from("tests/sample.dict");
         let mut mutation = Mutation::new(Some(dictpath), None);
 
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
         mutation.data = test.clone();
 
-        mutation.mutate_dictionary_replacement();
-        mutation.mutate_dictionary_replacement();
+        mutation.mutate_dictionary_replacement()?;
+        mutation.mutate_dictionary_replacement()?;
 
-        println!("tokenized:\t{}", String::from_utf8_lossy(&mutation.data))
+        println!("tokenized:\t{}", String::from_utf8_lossy(&mutation.data));
+        Ok(())
     }
 }
