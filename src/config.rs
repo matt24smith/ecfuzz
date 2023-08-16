@@ -1,8 +1,9 @@
+use std::env::vars;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::mutator::main as mutate_stdin;
 use crate::mutator::Mutation;
-use std::time::SystemTime;
 
 const HELPTXT: &str = r#"
 Mutate {}
@@ -72,14 +73,8 @@ pub struct Config {
 /// max number of executions, etc.
 impl Config {
     /// returns CLI help text including platform-specific defaults
-    pub fn help() -> String {
-        let t = (SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap())
-        .as_secs()
-        .to_string();
+    pub fn help(mut mutator: Mutation) -> String {
         let defaults = Config::defaults();
-        let mut mutator = Mutation::with_seed(None, t.as_bytes().to_vec(), None);
         mutator.data = defaults
             .target_path
             .as_os_str()
@@ -107,7 +102,7 @@ impl Config {
     /// initialize target execution config with default values
     pub fn defaults() -> Self {
         Config {
-            iter_check: 50, // frequency of printed status updates
+            iter_check: 100, // frequency of printed status updates
             iterations: 10000,
             target_path: PathBuf::from("./fuzz_target.c"),
 
@@ -139,13 +134,53 @@ impl Config {
             llvm_cov_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-cov.exe"),
 
             dict_path: None,
-            seed: vec![],
-            corpus_files: vec![],
-            corpus_dirs: vec![],
+            seed: Vec::new(),
+            corpus_files: Vec::new(),
+            corpus_dirs: Vec::new(),
             objects: vec![PathBuf::from("a.out")],
             mutate_file: false,
             mutate_args: false,
             multiplier: Some(0.01),
+        }
+    }
+
+    /// Update Config settings as set by environment variables
+    pub fn load_env(&mut self) {
+        for (k, v) in vars()
+            .filter(|kv| kv.0.contains("ECFUZZ_"))
+            .collect::<Vec<(String, String)>>()
+        {
+            println!("{}={}", k, v);
+            match k.as_ref() {
+                "ECFUZZ_CC_PATH" => self.cc_path = PathBuf::from(v),
+                "ECFUZZ_CORPUS_DIRS" => {
+                    self.corpus_dirs = v.split_whitespace().map(PathBuf::from).collect()
+                }
+                "ECFUZZ_CORPUS_FILES" => {
+                    self.corpus_files = v.split_whitespace().map(PathBuf::from).collect()
+                }
+                "ECFUZZ_DICT_PATH" => self.dict_path = Some(PathBuf::from(v)),
+                "ECFUZZ_ITERATIONS" => {
+                    self.iterations = v.parse().expect("parsing $ECFUZZ_ITERATIONS as usize")
+                }
+                "ECFUZZ_ITER_CHECK" => {
+                    self.iter_check = v.parse().expect("parsing $ECFUZZ_ITER_CHECK as usize")
+                }
+                "ECFUZZ_LLVM_COV_PATH" => self.llvm_cov_path = PathBuf::from(v),
+                "ECFUZZ_LLVM_PROFDATA_PATH" => self.llvm_profdata_path = PathBuf::from(v),
+                "ECFUZZ_MULTIPLIER" => {
+                    self.multiplier = Some(v.parse().expect("parsing $ECFUZZ_MULTIPLIER as f64"))
+                }
+                "ECFUZZ_MUTATE_ARGS" => self.mutate_args = true,
+                "ECFUZZ_MUTATE_FILE" => self.mutate_file = true,
+                "ECFUZZ_OBJECTS" => {
+                    self.objects = v.split_whitespace().map(PathBuf::from).collect()
+                }
+                "ECFUZZ_SEED" => self.seed = v.into_bytes(),
+                _ => {
+                    panic!("unknown env option {}", k)
+                }
+            }
         }
     }
 
@@ -167,12 +202,18 @@ impl Config {
 
         // print help text
         if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-            println!("{}", Config::help());
+            let t = (SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap())
+            .as_secs()
+            .to_string();
+            let mutator = Mutation::with_seed(None, t.as_bytes().to_vec(), None);
+            println!("{}", Config::help(mutator));
             std::process::exit(0);
         }
 
         // warn about extra arguments
-        let argstring = Config::help().replace(',', " ");
+        let argstring = HELPTXT.replace(',', " ");
         let known_args: Vec<&str> = argstring
             .split(' ')
             .filter(|a| !a.is_empty() && a.starts_with('-'))
