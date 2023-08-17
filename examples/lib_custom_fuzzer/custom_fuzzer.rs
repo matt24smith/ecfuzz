@@ -211,7 +211,6 @@ impl MyFuzzEngine {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sets clang compiler and llvm tools paths to default settings
     let mut cfg = Config::defaults();
-    cfg.iter_check = 20;
     cfg.target_path = PathBuf::from("./examples/lib_custom_fuzzer/example.c");
     cfg.iterations = 10_000;
     cfg.objects = vec![PathBuf::from("./a.out")];
@@ -286,7 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // log some status messages every 100 execs
-        if i % exec.cfg.iter_check == 0 && i > 0 {
+        if i % 100 == 0 && i > 0 {
             //let branch_count = count_branch_total(&cfg, profdata)?;
             let status_msg = format!(
                 //"\r{:0>3} {:0>3} {:0>4}  {: >10}  {: >10}\t{: >10}  branches: {}/{}  exec/s {:.2}  i: {}",
@@ -299,7 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 String::from_utf8_lossy(&mutated.str3.as_bytes().to_vec()),
                 cov_corpus.total_coverage.len(),
                 //branch_count,
-                exec.cfg.iter_check as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
+                100.0 as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
                 i
                 );
             timer_start = Instant::now();

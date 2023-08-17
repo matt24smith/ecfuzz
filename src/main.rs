@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::create_dir;
 use std::io::{stdout, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Output;
 use std::sync::mpsc::channel;
 use std::thread::available_parallelism;
@@ -47,63 +47,6 @@ fn log_crash_known(stderr: &[u8], i: &usize, _crash_corpus: &Corpus) {
     );
 }
 
-/// If the fuzz execution result for a given mutation yielded new coverage,
-/// add it to the cov_corpus.
-/// If the mutation yielded a crash with new coverage, add it to the crash_corpus.
-/// Corpus will be saved to outdir, crashes are logged to crashdir.
-fn handle_fuzzed_result(
-    corpus_entry: CorpusInput,
-    cov_corpus: &mut Corpus,
-    crash_corpus: &mut Corpus,
-    result: ExecResult<Output>,
-    outdir: &Path,
-    crashdir: &Path,
-    i: &usize,
-) {
-    match result {
-        // if the report contains new coverage, add to corpus as CorpusInput
-        ExecResult::Ok(_output) => {
-            if !cov_corpus
-                .total_coverage
-                .is_superset(&corpus_entry.coverage)
-            {
-                // update corpus
-                cov_corpus.add_and_distill_corpus(corpus_entry.clone());
-                cov_corpus
-                    .save(outdir.to_path_buf())
-                    .expect("saving corpus to output directory");
-
-                // print updated corpus
-                log_new_coverage(i, cov_corpus);
-            }
-        }
-        // if the report crashed, try to check the coverage or fallback to
-        // parent coverage
-        ExecResult::Err(output) => {
-            if !crash_corpus
-                .total_coverage
-                .is_superset(&corpus_entry.coverage)
-            {
-                // update corpus
-                crash_corpus.add_and_distill_corpus(corpus_entry);
-                crash_corpus
-                    .save(crashdir.to_path_buf())
-                    .expect("saving crash corpus");
-
-                // print updated corpus
-                log_crash_new(&output.stderr, i, crash_corpus);
-            } else {
-                log_crash_known(&output.stderr, i, crash_corpus);
-                if corpus_entry.coverage.is_empty() {
-                    eprintln!(
-                        "Error: could not read coverage from crash! See output from sanitizer"
-                    );
-                }
-            }
-        }
-    }
-}
-
 /// main loop:
 /// send input to target, read the coverage resulting from the input, and
 /// update the corpus with inputs yielding new coverage
@@ -115,9 +58,10 @@ pub fn _main_loop(
     // crashlog
     let mut crash_corpus = Corpus::new();
     let branch_count = exec.count_branch_total()?;
-    let outdir = PathBuf::from("output/mutations");
+    //let outdir = PathBuf::from("output/mutations").as_ref;
+    let outdir = &exec.cfg.output_dir.as_path().join("");
     let crashdir = PathBuf::from("output/crashes");
-    create_dir(&outdir).unwrap_or_default();
+    create_dir(outdir).unwrap_or_default();
 
     // worker thread pool
     let (sender, receiver) = channel::<(usize, CorpusInput, ExecResult<Output>)>();
@@ -136,6 +80,7 @@ pub fn _main_loop(
 
     let mut timer_start = Instant::now();
     let mut status: String = String::default();
+    let mut refresh_rate: usize = 0;
 
     for i in 0..exec.cfg.iterations + FUZZING_QUEUE_SIZE {
         // mutate the input
@@ -184,23 +129,73 @@ pub fn _main_loop(
             .remove(&(i - FUZZING_QUEUE_SIZE * 2))
             .expect("retrieving fuzz job results");
 
-        handle_fuzzed_result(
-            corpus_entry,
-            cov_corpus,
-            &mut crash_corpus,
-            result,
-            &outdir,
-            &crashdir,
-            &i,
-        );
+        // If the fuzz execution result for a given mutation yielded new coverage,
+        // add it to the cov_corpus.
+        // If the mutation yielded a crash with new coverage, add it to the crash_corpus.
+        // Corpus will be saved to outdir, crashes are logged to crashdir.
+        match result {
+            // if the report contains new coverage, add to corpus as CorpusInput
+            ExecResult::Ok(_output) => {
+                if !cov_corpus
+                    .total_coverage
+                    .is_superset(&corpus_entry.coverage)
+                {
+                    // update corpus
+                    cov_corpus.add_and_distill_corpus(corpus_entry.clone());
+                    cov_corpus
+                        .save(outdir.to_path_buf())
+                        .expect("saving corpus to output directory");
 
+                    // print updated corpus
+                    log_new_coverage(&i, cov_corpus);
+                    print!("{}", status);
+                    stdout().flush().unwrap();
+                }
+            }
+            // if the report crashed, try to check the coverage or fallback to
+            // parent coverage
+            ExecResult::Err(output) => {
+                if !crash_corpus
+                    .total_coverage
+                    .is_superset(&corpus_entry.coverage)
+                {
+                    // update corpus
+                    crash_corpus.add_and_distill_corpus(corpus_entry);
+                    crash_corpus
+                        .save(crashdir.to_path_buf())
+                        .expect("saving crash corpus");
+
+                    // print updated corpus
+                    log_crash_new(&output.stderr, &i, &crash_corpus);
+                    print!("{}", status);
+                    stdout().flush().unwrap();
+                } else {
+                    log_crash_known(&output.stderr, &i, &crash_corpus);
+                    print!("{}", status);
+                    stdout().flush().unwrap();
+                    if corpus_entry.coverage.is_empty() {
+                        eprintln!(
+                            "Error: could not read coverage from crash! See output from sanitizer"
+                        );
+                    }
+                }
+            }
+        }
         // print some status info
-        if i % exec.cfg.iter_check == 0 && 0 < i && i <= exec.cfg.iterations {
-            assert!(timer_start.elapsed().as_millis() > 0);
+        if i == FUZZING_QUEUE_SIZE {
+            timer_start = Instant::now();
+        } else if i == FUZZING_QUEUE_SIZE * 2 {
             let exec_rate =
-                exec.cfg.iter_check as f64 / (timer_start.elapsed().as_micros() as f64 / 1e6);
+                FUZZING_QUEUE_SIZE as f64 / (timer_start.elapsed().as_micros() as f64 / 1e6); // seconds
+            refresh_rate = (exec_rate / 24.0) as usize; // frames per second
+            timer_start = Instant::now();
+        } else if i % refresh_rate == 0
+            && refresh_rate > 0
+            && i <= exec.cfg.iterations + FUZZING_QUEUE_SIZE
+        {
+            let exec_rate = refresh_rate as f64 / (timer_start.elapsed().as_micros() as f64 / 1e6);
             status = format!(
-                "\rcoverage: {:>2}/{}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8}  {}",
+                "\rcoverage: {:>2}/{}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8} {:<16}",
                 cov_corpus.total_coverage.len(),
                 branch_count,
                 exec_rate,
@@ -216,7 +211,7 @@ pub fn _main_loop(
     }
     println!("{}", status);
 
-    cov_corpus.save(outdir).unwrap();
+    cov_corpus.save(outdir.to_path_buf()).unwrap();
     crash_corpus.save(crashdir).unwrap();
 
     assert!(finished_map.is_empty());

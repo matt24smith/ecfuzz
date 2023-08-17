@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 [lib]
 path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

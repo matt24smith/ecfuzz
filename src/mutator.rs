@@ -51,6 +51,8 @@ Example:
 
 "#;
 
+type Mutators = Vec<for<'r> fn(&'r mut Mutation) -> Result<(), MutationError>>;
+
 /// Mutation engine.
 /// input to be mutated is stored in data.
 /// If a dictionary map is given, dict keys will be inserted if the values
@@ -61,9 +63,20 @@ pub struct Mutation {
     pub dict: Option<BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
     hasher: Xxh3,
     hash_seed: [u8; 4],
-    mutators: Vec<for<'r> fn(&'r mut Mutation) -> Result<(), ()>>,
+    mutators: Mutators,
     multiplier: f64,
 }
+
+#[derive(Debug)]
+pub struct MutationError;
+
+impl std::fmt::Display for MutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid mutation")
+    }
+}
+
+impl std::error::Error for MutationError {}
 
 /// Magic values consist of a tuple with byte size and a bytestring.
 /// Variants can be 1, 2, or 4 bytes length.
@@ -232,7 +245,7 @@ impl Mutation {
 
     /// magic number mutation
     /// splices data with random magic value
-    pub fn mutate_magic(&mut self) -> Result<(), ()> {
+    pub fn mutate_magic(&mut self) -> Result<(), MutationError> {
         let (mut n_size, n) = self.magic_char();
         if n_size > self.data.len() {
             n_size = self.data.len();
@@ -249,7 +262,7 @@ impl Mutation {
     }
 
     /// XOR mutation and bitshift
-    pub fn mutate_bits(&mut self) -> Result<(), ()> {
+    pub fn mutate_bits(&mut self) -> Result<(), MutationError> {
         let bit = self.hashfunc() % (self.data.len() * 8);
         let idx_bit: usize = bit % 8;
         let idx_byte: usize = bit / 8;
@@ -258,14 +271,14 @@ impl Mutation {
     }
 
     /// replace randomly selected bytes with random data of equivalent length
-    pub fn mutate_bytes(&mut self) -> Result<(), ()> {
+    pub fn mutate_bytes(&mut self) -> Result<(), MutationError> {
         let dataidx = self.hashfunc() % self.data.len();
         self.data[dataidx] = (self.hashfunc() % 256) as u8;
         Ok(())
     }
 
     /// random dictionary insertion
-    pub fn mutate_dictionary(&mut self) -> Result<(), ()> {
+    pub fn mutate_dictionary(&mut self) -> Result<(), MutationError> {
         let val_idx = self.hashfunc()
             % self
                 .dict
@@ -287,7 +300,7 @@ impl Mutation {
     }
 
     /// tokenized dictionary replacement
-    pub fn mutate_dictionary_replacement(&mut self) -> Result<(), ()> {
+    pub fn mutate_dictionary_replacement(&mut self) -> Result<(), MutationError> {
         let mut keys = self
             .dict
             .as_ref()
@@ -315,7 +328,7 @@ impl Mutation {
             "no matching tokens in corpus for {}! skipping...",
             String::from_utf8_lossy(&self.data),
         );
-        Err(())
+        Err(MutationError)
     }
 
     /// applies a random mutator to input
@@ -411,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mutations() -> Result<(), ()> {
+    fn test_mutations() -> Result<(), MutationError> {
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
 
         let mut mutation = Mutation::new(None, None);
@@ -463,17 +476,16 @@ mod tests {
     }
 
     #[test]
-    fn test_dict() -> Result<(), ()> {
+    fn test_dict() {
         let dictpath = PathBuf::from("tests/sample.dict");
         let mut mutation = Mutation::new(Some(dictpath), None);
 
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
         mutation.data = test.clone();
 
-        mutation.mutate_dictionary_replacement()?;
-        mutation.mutate_dictionary_replacement()?;
+        mutation.mutate_dictionary_replacement().unwrap();
+        mutation.mutate_dictionary_replacement().unwrap();
 
         println!("tokenized:\t{}", String::from_utf8_lossy(&mutation.data));
-        Ok(())
     }
 }

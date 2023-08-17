@@ -28,6 +28,8 @@ Options:
 
   -t, --target <fuzz_target.c>  Clang input file. Defaults to '{}'
 
+  --output-dir <output>         Output corpus directory. Defaults to '{}'
+
   -x, --compiler <path>         Compiler path. Defaults to '{}'
 
   --llvm-profdata-path <path>   Path to llvm-profdata. Defaults to '{}'
@@ -49,16 +51,21 @@ Options:
                                 as a list of object files or by shell expansion
 
 Pass additional args to the compiler by setting $CFLAGS
+
+Environment variables with the 'ECFUZZ_' prefix, capital letters, and 
+underscores will override these settings: 
+    export ECFUZZ_CORPUS_DIRS="./output/mutations/mutation/ ./output/crashes/mutation/"
 "#;
 
 #[derive(Clone)]
 pub struct Config {
     pub cc_path: PathBuf,
-    pub iter_check: usize,
+    // pub iter_check: usize,
     pub iterations: usize,
     pub llvm_cov_path: PathBuf,
     pub llvm_profdata_path: PathBuf,
     pub target_path: PathBuf,
+    pub output_dir: PathBuf,
     pub dict_path: Option<PathBuf>,
     pub corpus_files: Vec<PathBuf>,
     pub corpus_dirs: Vec<PathBuf>,
@@ -88,6 +95,7 @@ impl Config {
         for arg in [
             &header,
             defaults.target_path.as_os_str().to_str().unwrap(),
+            defaults.output_dir.as_os_str().to_str().unwrap(),
             defaults.cc_path.as_os_str().to_str().unwrap(),
             defaults.llvm_profdata_path.as_os_str().to_str().unwrap(),
             defaults.llvm_cov_path.as_os_str().to_str().unwrap(),
@@ -102,8 +110,17 @@ impl Config {
     /// initialize target execution config with default values
     pub fn defaults() -> Self {
         Config {
-            iter_check: 100, // frequency of printed status updates
+            corpus_dirs: Vec::new(),
+            corpus_files: Vec::new(),
+            dict_path: None,
+            //iter_check: 100, // frequency of printed status updates
             iterations: 10000,
+            multiplier: Some(0.01),
+            mutate_args: false,
+            mutate_file: false,
+            objects: vec![PathBuf::from("a.out")],
+            output_dir: PathBuf::from("output"),
+            seed: Vec::new(),
             target_path: PathBuf::from("./fuzz_target.c"),
 
             // default paths for Linux
@@ -133,14 +150,6 @@ impl Config {
             #[cfg(target_os = "windows")]
             llvm_cov_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-cov.exe"),
 
-            dict_path: None,
-            seed: Vec::new(),
-            corpus_files: Vec::new(),
-            corpus_dirs: Vec::new(),
-            objects: vec![PathBuf::from("a.out")],
-            mutate_file: false,
-            mutate_args: false,
-            multiplier: Some(0.01),
         }
     }
 
@@ -163,9 +172,7 @@ impl Config {
                 "ECFUZZ_ITERATIONS" => {
                     self.iterations = v.parse().expect("parsing $ECFUZZ_ITERATIONS as usize")
                 }
-                "ECFUZZ_ITER_CHECK" => {
-                    self.iter_check = v.parse().expect("parsing $ECFUZZ_ITER_CHECK as usize")
-                }
+                // "ECFUZZ_ITER_CHECK" => { self.iter_check = v.parse().expect("parsing $ECFUZZ_ITER_CHECK as usize") }
                 "ECFUZZ_LLVM_COV_PATH" => self.llvm_cov_path = PathBuf::from(v),
                 "ECFUZZ_LLVM_PROFDATA_PATH" => self.llvm_profdata_path = PathBuf::from(v),
                 "ECFUZZ_MULTIPLIER" => {
@@ -176,6 +183,7 @@ impl Config {
                 "ECFUZZ_OBJECTS" => {
                     self.objects = v.split_whitespace().map(PathBuf::from).collect()
                 }
+                "ECFUZZ_OUTPUT_DIR" => self.output_dir = PathBuf::from(v),
                 "ECFUZZ_SEED" => self.seed = v.into_bytes(),
                 _ => {
                     panic!("unknown env option {}", k)
@@ -372,6 +380,19 @@ impl Config {
             let mut stop = false;
             for arg in &args {
                 if arg == "-O" || arg == "--object-files" {
+                    stop = true;
+                } else if stop && arg[..1] != *"-" {
+                    cfg.objects.push(PathBuf::from(arg));
+                } else {
+                    stop = false;
+                }
+            }
+        }
+
+        if args.contains(&"--output-dir".to_string()) {
+            let mut stop = false;
+            for arg in &args {
+                if arg == "--output-dir" {
                     stop = true;
                 } else if stop && arg[..1] != *"-" {
                     cfg.objects.push(PathBuf::from(arg));
