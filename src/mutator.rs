@@ -124,13 +124,13 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
     let lines = read(&dict_path)
         .unwrap_or_else(|_| panic!("could not load dictionary from file! {:?}", dict_path))
         .split(|x| x == &b'\n')
+        .filter(|x| !x.is_empty() && x[0] != b'#')
         .map(|x| x.to_vec())
         .collect::<Vec<Vec<u8>>>();
 
     for line in lines {
-        if line.is_empty() {
-            continue;
-        }
+        #[cfg(debug_assertions)]
+        assert!(!line.is_empty());
         let key: Vec<u8>;
         let val: Vec<u8>;
         let keypair = line
@@ -143,13 +143,15 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
             val = keypair[1].to_owned();
             #[cfg(debug_assertions)]
             println!(
-                "token {:?} {:?}",
+                "  token replace {:?} {:?}",
                 String::from_utf8_lossy(&key),
                 String::from_utf8_lossy(&val)
             );
         } else {
             key = b"".to_vec();
             val = keypair[0].to_owned();
+            #[cfg(debug_assertions)]
+            println!("  splice: {:?}", String::from_utf8_lossy(&val));
         }
 
         if let Vacant(_e) = dict.entry(key.clone()) {
@@ -160,7 +162,7 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
     }
     println!(
         "loaded dictionary: {}",
-        dict_path.as_os_str().to_str().unwrap()
+        dict_path.as_os_str().to_str().unwrap(),
     );
     dict
 }

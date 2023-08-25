@@ -1,3 +1,9 @@
+/*
+ECFuzz driver for libfuzz harnesses
+This file is equivalent of libfuzz StandaloneFuzzTargetMain.c, except it will 
+send input via stdin instead of an input file
+ */
+
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -6,22 +12,22 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <math.h>
-#include "input/jsoncpp/src/test_lib_json/fuzz.h"
 
 
-extern int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size);
-__attribute__((weak)) int LLVMFuzzerInitialize(int *argc, char ***argv);
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size);
+__attribute__((weak)) extern int LLVMFuzzerInitialize(int *argc, char ***argv);
 
-size_t LLVMFuzzerMutate(uint8_t *Data, size_t Size, size_t MaxSize) {
+extern "C" size_t LLVMFuzzerMutate(uint8_t *data, size_t size, size_t max_size) {
   assert(false && "LLVMFuzzerMutate should not be called from this driver");
   return 0;
 }
 
 const uint_fast32_t maxsize = 2 * 1024 * 1024;
-const uint_fast32_t bufsize = 1024;
+const uint_fast32_t bufsize = 128;
 
 int main(int argc, char **argv) {
-  //if (LLVMFuzzerInitialize) LLVMFuzzerInitialize(&argc, &argv);
+  if (LLVMFuzzerInitialize) LLVMFuzzerInitialize(&argc, &argv);
+
   uint8_t bytes[maxsize] = {};
   uint32_t count = 0;
   char buf[bufsize];
@@ -31,6 +37,5 @@ int main(int argc, char **argv) {
     memcpy(&bytes[count], buf, nread);
     count += nread;
   }
-  //printf("BYTE SIZE: %d\t %s\n", count, bytes);
   return LLVMFuzzerTestOneInput(bytes, sizeof(bytes));
 }

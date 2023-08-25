@@ -24,7 +24,6 @@ const CFLAGS_DEFAULTS: &str =
 // also see:
 // <https://lldb.llvm.org/use/tutorial.html#starting-or-attaching-to-your-program>
 
-use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsString;
@@ -57,13 +56,12 @@ const FUZZING_QUEUE_SIZE: usize = 256;
 #[cfg(not(debug_assertions))]
 #[cfg(target_os = "linux")]
 pub const SANITIZERS: &[&str] = &[
-    //"fuzzer",
     "address",
     "cfi",
     "leak",
-    "memory",
+    //"memory",
     "safe-stack",
-    "thread",
+    //"thread",
     "undefined",
 ];
 #[cfg(not(debug_assertions))]
@@ -163,15 +161,6 @@ impl Exec {
                 setup_args.push(include_string);
             }
             setup_args.push("-Wl,--no-whole-archive".to_string());
-            /*
-            for inc in &cfg.include_whole {
-                let mut include_string = inc.display().to_string();
-                include_string.insert_str(0, "-I");
-                setup_args.push("-Wl,--whole-archive".to_string());
-                setup_args.push(include_string);
-                setup_args.push("-Wl,--no-whole-archive".to_string());
-            }
-            */
 
             println!(
                 "compiling...\n{} {}\n",
@@ -219,9 +208,6 @@ impl Exec {
             "output/{}.profdata",
             current().name().expect("getting thread name"),
         ));
-
-        //#[cfg(debug_assertions)]
-        //assert!(!profraw.exists()); // ensure profile data was cleaned up last time
 
         //let sanitizer_idx: usize = self.engine.hashfunc() % SANITIZERS.len();
         let sanitizer_idx: usize = hash_num % SANITIZERS.len();
@@ -400,8 +386,9 @@ impl Exec {
                         stdout().flush().unwrap();
                         if corpus_entry.coverage.is_empty() {
                             eprintln!(
-                                        "Error: could not read coverage from crash! See output from sanitizer"
-                                        );
+                            "\nError: could not read coverage from crash! See output from sanitizer\n{}",
+                            String::from_utf8_lossy(&output.stderr)
+                            );
                         }
                     }
                 }
@@ -418,14 +405,15 @@ impl Exec {
                 let exec_rate =
                     refresh_rate as f64 / (timer_start.elapsed().as_micros() as f64 / 1e6);
                 status = format!(
-                    "\rcoverage: {:>2}/{}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8} {:<32}",
+                    //"\rcoverage: {:>2}/{}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8} {:<32}",
+                    "\rcoverage: {:>5}/{:<5}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8}",
                     cov_corpus.total_coverage.len(),
                     branch_count,
                     exec_rate,
                     cov_corpus.inputs.len(),
                     crash_corpus.inputs.len(),
                     i,
-                    String::from_utf8_lossy(&mutation.data.borrow()[0..min(32, mutation.data.borrow().len())]).replace("\n",""),
+                    //String::from_utf8_lossy(&mutation.data.borrow()[0..min(32, mutation.data.borrow().len())]).replace("\n",""),
                     );
                 print!("{}", status);
                 stdout().flush().unwrap();
@@ -513,21 +501,12 @@ impl Exec {
             "export",
             "--instr-profile",
             &profile_filepath.display().to_string(),
-            "-check-binary-ids",
+            "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp", //"-check-binary-ids",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
 
-        /*
-        #[cfg(debug_assertions)]
-        assert!(!self.cfg.objects.is_empty());
-
-        for obj in &self.cfg.objects {
-            prof_report_args.push("--object".to_string());
-            prof_report_args.push(obj.as_os_str().to_string_lossy().to_string());
-        }
-        */
         prof_report_args.push("--object".to_string());
         prof_report_args.push(compiled_executable_path(
             &self.cfg,
@@ -600,7 +579,7 @@ fn log_crash_new(stderr: &[u8], i: &usize, new: &CorpusInput) {
 }
 
 /// log known crashes to stderr
-fn log_crash_known(stderr: &[u8], i: &usize, _crash_corpus: &Corpus) {
+fn log_crash_known(_stderr: &[u8], i: &usize, _crash_corpus: &Corpus) {
     eprintln!(
         //"\r\x1b[91mKnown crash!\x1b[0m execs: {:<80}\n{}",
         "\r\x1b[91mKnown crash!\x1b[0m execs: {:<80}",
@@ -618,7 +597,7 @@ fn exec_target(
     raw_profile_filepath: &PathBuf,
     input: &[u8],
 ) -> ExecResult<Output> {
-    let executable = compiled_executable_path(&cfg, &SANITIZERS[sanitizer_idx]);
+    let executable = compiled_executable_path(cfg, SANITIZERS[sanitizer_idx]);
     if cfg.mutate_file {
         exec_target_filein(&executable, raw_profile_filepath, input)
     } else if cfg.mutate_args {
@@ -639,7 +618,7 @@ fn exec_target_stdin(
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect(format!("Running target executable {}", executable).as_str());
+        .unwrap_or_else(|_| panic!("Running target executable {}", executable));
 
     let send_input = profile_target.stdin.take().unwrap();
     let mut send_input = BufWriter::new(send_input);
@@ -674,7 +653,8 @@ fn exec_target_filein(
 
     let profile_target = Command::new(executable)
         .env("LLVM_PROFILE_FILE", raw_profile_filepath)
-        .args(["--mutation-file", &fname])
+        //.args(["--mutation-file", &fname])
+        .arg(&fname)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();

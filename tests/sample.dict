@@ -1,3 +1,6 @@
+# comments starting with '#' will not be parsed
+# this is a comment followed by an empty line 
+
 quick=slow
 brown=purple
 fox=cow

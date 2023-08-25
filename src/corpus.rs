@@ -196,8 +196,9 @@ impl Corpus {
         println!("\rsaving to {:#?} ... {:<70}", output_dir, "");
 
         for (i, input) in self.inputs.iter().enumerate() {
+            let output_name = format!("{:05}-cov{:04}", i, &input.coverage.len());
             input
-                .serialize(&mutations, &coverages, format!("{:05}", i).as_str())
+                .serialize(&mutations, &coverages, &output_name)
                 .expect("saving corpus to directory");
         }
 
@@ -225,7 +226,7 @@ impl std::fmt::Debug for CorpusInput {
             .field("lifetime", &self.lifetime)
             .field(
                 "preview",
-                &String::from_utf8_lossy(&self.data.borrow()[0..maxlen]).replace("\n", ""),
+                &String::from_utf8_lossy(&self.data.borrow()[0..maxlen]).replace('\n', ""),
             )
             .finish()
     }
@@ -241,7 +242,7 @@ impl std::fmt::Display for CorpusInput {
             .field("lifetime", &self.lifetime)
             .field(
                 "preview",
-                &String::from_utf8_lossy(&self.data.borrow()[0..maxlen]).replace("\n", ""),
+                &String::from_utf8_lossy(&self.data.borrow()[0..maxlen]).replace('\n', ""),
             )
             .finish()
     }

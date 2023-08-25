@@ -1,6 +1,9 @@
 **.coverage
 **.dSYM
+**.gcda
+**.gcno
 **.mutation
+**.out
 **a.out
 **json
 **profdata
@@ -9,6 +12,7 @@
 *.out
 .DS_Store
 /output
+StandaloneFuzzTargetMain.c
 a.exp
 a.lib
 a.out
