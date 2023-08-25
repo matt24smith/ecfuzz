@@ -561,7 +561,7 @@ impl Exec {
 /// log coverage increases to stdout
 fn log_new_coverage(i: &usize, new: &CorpusInput) {
     println!(
-        "\r\x1b[32mNew coverage!\x1b[0m execs: {}  updating inputs... {:<50}{}\n",
+        "\r\x1b[32mNew coverage!\x1b[0m execs: {}  updating inputs... {:<50}{:?}\n",
         i, "", new
     );
 }
@@ -569,7 +569,7 @@ fn log_new_coverage(i: &usize, new: &CorpusInput) {
 /// log new crashes to stderr
 fn log_crash_new(stderr: &[u8], i: &usize, new: &CorpusInput) {
     eprintln!(
-        "\r\x1b[31mNew crash!\x1b[0m execs: {}  updating crash log...{:<50}{}\n{}",
+        "\r\x1b[31mNew crash!\x1b[0m execs: {}  updating crash log...{:<50}{:?}\n{}",
         i,
         "",
         //&crash_corpus,

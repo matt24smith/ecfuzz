@@ -37,7 +37,7 @@ cargo run --release --\
     --corpus-dir ./input/jsoncpp/test/data \
     --dictionary-path ./input/jsoncpp/src/test_lib_json/fuzz.dict \
     --seed 0 \
-    --iterations 10000 \
+    --iterations 200000 \
     --llvm-profdata-path $LLVM_PROFDATA_PATH \
     --llvm-cov-path $LLVM_COV_PATH \
     --output-dir ./output/jsoncpp/

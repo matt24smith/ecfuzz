@@ -31,7 +31,7 @@ cd ../../..
 # verify target library can be linked to fuzzer
 CFLAGS=$CFLAGS LDFLAGS=$LDFLAGS $CXX \
   -fuse-ld=lld \
-  ./libfuzz-driver.c \
+  ./libfuzz-driver.cpp \
   -I./input/jsoncpp/include \
   ./input/jsoncpp/src/test_lib_json/fuzz.cpp \
   ./input/jsoncpp/build/lib/libjsoncpp.a \

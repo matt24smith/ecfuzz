@@ -193,11 +193,18 @@ impl Corpus {
             }
         }
 
-        println!("\rsaving to {:#?} ... {:<70}", output_dir, "");
+        println!("\rsaving to {:#} ... {:<70}", output_dir.display(), "");
+        let mut outputs: Vec<&CorpusInput> = self.inputs.iter().collect();
+        outputs.sort_by(|a, b| b.coverage.len().cmp(&a.coverage.len()));
 
-        for (i, input) in self.inputs.iter().enumerate() {
-            let output_name = format!("{:05}-cov{:04}", i, &input.coverage.len());
-            input
+        for (i, output) in outputs.iter().enumerate() {
+            let output_name = format!(
+                "{:05}-cov{:04}-gen{:03}",
+                i,
+                &output.coverage.len(),
+                &output.lifetime
+            );
+            output
                 .serialize(&mutations, &coverages, &output_name)
                 .expect("saving corpus to directory");
         }

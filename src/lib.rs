@@ -40,7 +40,7 @@ pub fn begin() -> Result<(), Box<dyn Error>> {
     cov_corpus.initialize(&mut executor);
 
     println!(
-        "branches hit by initial corpus: {}/{}\n{}",
+        "branches hit by initial corpus: {}/{}\n{:?}",
         cov_corpus.total_coverage.len(),
         executor
             .count_branch_total(0)
