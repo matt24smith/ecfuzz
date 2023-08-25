@@ -15,14 +15,19 @@ edition = "2021"
 
 [[bin]]
 name = "ecfuzz"
-path = "src/main.rs"
+#path = "src/main.rs"
+path = "src/bin/ecfuzz.rs"
 
 [lib]
 path = "src/lib.rs"
-crate-type = ["rlib", "staticlib"]
+crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rayon = "1"
+
+# exporting extern C main() requires experimental
+[toolchain]
+channel = "nightly"

@@ -1,17 +1,17 @@
 //! Maintain corpus inputs as they evolve with each generation of mutations
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs::{metadata, read, read_dir, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::execute::Exec;
+use crate::execute::{Exec, ExecResult};
 
 /// each test input sent to the target program contains the byte vector
 /// to be tested, as well as the resulting branch coverage set and some metadata
-#[derive(Clone)]
 pub struct CorpusInput {
-    pub data: Vec<u8>,
+    pub data: RefCell<Vec<u8>>,
     pub coverage: HashSet<u64>,
     pub lifetime: u64,
 }
@@ -26,7 +26,7 @@ impl CorpusInput {
     /// Initialize a new CorpusInput with empty values
     pub fn empty() -> Self {
         CorpusInput {
-            data: b"".to_vec(),
+            data: b"".to_vec().into(),
             coverage: HashSet::new(),
             lifetime: 0,
         }
@@ -62,7 +62,7 @@ impl CorpusInput {
 
         File::create(fpath)
             .expect("creating fpath")
-            .write_all(&self.data)
+            .write_all(&self.data.borrow())
             .expect("writing mutation to file");
         File::create(cov_path.clone())
             .unwrap_or_else(|_| panic!("creating cov_path: {}", cov_path.to_str().unwrap()))
@@ -121,7 +121,7 @@ impl Corpus {
             .map(|x| x.to_vec())
             .filter(|x| !x.is_empty())
             .map(|x| CorpusInput {
-                data: x,
+                data: x.into(),
                 coverage: HashSet::new(),
                 lifetime: 0,
             })
@@ -144,7 +144,7 @@ impl Corpus {
             .iter()
             .map(|e| read(e).expect("reading corpus dir"))
             .map(|x| CorpusInput {
-                data: x,
+                data: x.into(),
                 coverage: HashSet::new(),
                 lifetime: 0,
             })
@@ -172,17 +172,20 @@ impl Corpus {
 
     /// append the inputs of another corpus into this corpus
     pub fn append(&mut self, corpus: Corpus) {
-        for input in &corpus.inputs {
-            self.inputs.push(input.clone());
+        for input in corpus.inputs {
+            self.inputs.push(input);
         }
         self.total_coverage.extend(&corpus.total_coverage);
     }
 
     /// append corpus entries to the corpus file.
     /// a .coverage file will also be created with branch coverage info
-    pub fn save(&self, output_dir: PathBuf) -> std::io::Result<()> {
+    pub fn save(&self, output_dir: &PathBuf) -> std::io::Result<()> {
         let mutations: PathBuf = output_dir.join("mutation");
         let coverages: PathBuf = output_dir.join("coverage");
+
+        let _ = std::fs::remove_dir_all(&mutations);
+        let _ = std::fs::remove_dir_all(&coverages);
 
         for dir in [&output_dir, &mutations, &coverages] {
             if !dir.exists() {
@@ -194,7 +197,7 @@ impl Corpus {
 
         for (i, input) in self.inputs.iter().enumerate() {
             input
-                .serialize(&mutations, &coverages, format!("{}", i).as_str())
+                .serialize(&mutations, &coverages, format!("{:05}", i).as_str())
                 .expect("saving corpus to directory");
         }
 
@@ -202,11 +205,11 @@ impl Corpus {
     }
 
     /// update code coverage metrics for corpus inputs without mutating
-    pub fn initialize(&mut self, executor: &Exec) {
+    pub fn initialize(&mut self, executor: &mut Exec) {
         for input in &mut self.inputs {
-            let (input_updated, _crashed) = executor.trial(input, input.lifetime + 1);
-            input.coverage = input_updated.coverage.clone();
-            self.total_coverage.extend(&input_updated.coverage);
+            let _result: ExecResult<std::process::Output> = executor.trial(input, 0);
+            //input.coverage = input_updated.coverage.clone();
+            self.total_coverage.extend(&input.coverage);
         }
     }
 }
@@ -214,26 +217,32 @@ impl Corpus {
 impl std::fmt::Debug for CorpusInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut maxlen = 32;
-        if self.data.len() < maxlen {
-            maxlen = self.data.len();
+        if self.data.borrow().len() < maxlen {
+            maxlen = self.data.borrow().len();
         }
         f.debug_struct("\n    CorpusInput: ")
-            .field("coverage", &self.coverage)
+            .field("coverage", &self.coverage.len())
             .field("lifetime", &self.lifetime)
-            .field("preview", &String::from_utf8_lossy(&self.data[0..maxlen]))
+            .field(
+                "preview",
+                &String::from_utf8_lossy(&self.data.borrow()[0..maxlen]).replace("\n", ""),
+            )
             .finish()
     }
 }
 impl std::fmt::Display for CorpusInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut maxlen = 32;
-        if self.data.len() < maxlen {
-            maxlen = self.data.len();
+        if self.data.borrow().len() < maxlen {
+            maxlen = self.data.borrow().len();
         }
         f.debug_struct("\n    CorpusInput: ")
-            .field("coverage", &self.coverage)
+            .field("coverage", &self.coverage.len())
             .field("lifetime", &self.lifetime)
-            .field("data", &String::from_utf8_lossy(&self.data[0..maxlen]))
+            .field(
+                "preview",
+                &String::from_utf8_lossy(&self.data.borrow()[0..maxlen]).replace("\n", ""),
+            )
             .finish()
     }
 }
@@ -242,7 +251,7 @@ impl std::fmt::Debug for Corpus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("\n  Corpus")
             .field("inputs", &self.inputs)
-            .field("\n  Total coverage", &self.total_coverage)
+            .field("\n  Total coverage", &self.total_coverage.len())
             .finish()
     }
 }
@@ -250,7 +259,7 @@ impl std::fmt::Display for Corpus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("\n  Corpus")
             .field("inputs", &self.inputs)
-            .field("\n  Total coverage", &self.total_coverage)
+            .field("\n  Total coverage", &self.total_coverage.len())
             .finish()
     }
 }
@@ -286,12 +295,12 @@ mod tests {
         assert!(!corpus.inputs.is_empty());
 
         let mut cfg = Config::defaults();
-        cfg.target_path = PathBuf::from("./examples/cli/fuzz_target.c");
+        cfg.target_path = Vec::from([PathBuf::from("./examples/cli/fuzz_target.c")]);
 
         // compile target with instrumentation
-        let exec = Exec::initialize(cfg).unwrap();
+        let mut exec = Exec::initialize(cfg).unwrap();
 
         // check coverage of initial inputs
-        corpus.initialize(&exec);
+        corpus.initialize(&mut exec);
     }
 }

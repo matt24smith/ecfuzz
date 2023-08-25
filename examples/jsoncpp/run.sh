@@ -1,0 +1,12 @@
+cargo run --release --\
+    --compiler /opt/bin/clang++ \
+    --target ./libfuzz-driver.c \
+    --target ./input/jsoncpp/src/test_lib_json/fuzz.cpp \
+    --target ./input/jsoncpp/build/lib/libjsoncpp.a \
+    --include ./input/jsoncpp/include \
+    --corpus-dir ./input/jsoncpp/test/jsonchecker \
+    --corpus-dir ./input/jsoncpp/test/data \
+    --dictionary-path ./input/jsoncpp/src/test_lib_json/fuzz.dict \
+    --seed 0 \
+    --iterations 100000 \
+    --output-dir ./output/jsoncpp/

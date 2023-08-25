@@ -8,45 +8,49 @@ pub mod execute;
 
 pub mod mutator;
 
-use std::ffi::{c_int, c_uchar, CStr};
+use std::error::Error;
 
-#[no_mangle]
-pub extern "C" fn LLVMFuzzerTestOneInput(data: &CStr, size_t: c_int) -> c_int {
-    //let c = data.to_bytes()[0] == 'a' as c_uchar;
-    let data = data.to_bytes();
-    assert!(data.len() as i32 == size_t);
-    if data[0] == 'A' as c_uchar {
-        if data[1] == 'B' as c_uchar {
-            if data[2] == 'C' as c_uchar {
-                if data[3] == 'D' as c_uchar {
-                    if data[4] == 'E' as c_uchar {
-                        if data[5] == 'F' as c_uchar {
-                            //fprintf(stderr, "crashing path A...\n");
-                            eprintln!("crashing path A...");
-                            //char * crash = 0;
-                            //crash[0] = 'X';
-                            panic!();
-                        }
-                    }
-                }
-            }
-        }
-    } else if data[0] == 'G' as c_uchar {
-        if data[1] == 'H' as c_uchar {
-            if data[2] == 'I' as c_uchar {
-                if data[3] == 'J' as c_uchar {
-                    if data[4] == 'K' as c_uchar {
-                        if data[5] == 'L' as c_uchar {
-                            //fprintf(stderr, "crashing path B...\n");
-                            eprintln!("crashing path A...");
-                            //char * crash = 0;
-                            //crash[0] = 'X';
-                            panic!();
-                        }
-                    }
-                }
-            }
-        }
+use crate::config::Config;
+use crate::corpus::Corpus;
+use crate::execute::Exec;
+use crate::mutator::Mutation;
+
+pub fn begin() -> Result<(), Box<dyn Error>> {
+    // configure paths and initial state
+    let mut cfg: Config = Config::parse_args().expect("parsing config");
+    cfg.load_env();
+    let mut cov_corpus = Corpus::new();
+
+    // compile target
+    let mut engine = Mutation::with_seed(cfg.dict_path.clone(), cfg.seed.clone(), cfg.multiplier);
+    let mut executor = Exec::initialize(cfg).expect("preparing execution context");
+
+    // coverage profile paths
+    println!("seeding...");
+
+    // load corpus into memory
+    for filepath in &executor.cfg.corpus_files {
+        cov_corpus.append(Corpus::load(filepath).expect("reading corpus file"))
     }
-    return 0;
+    for filepath in &executor.cfg.corpus_dirs {
+        cov_corpus.append(Corpus::load(filepath).expect("reading corpus dir"))
+    }
+
+    // check initial corpus coverage
+    cov_corpus.initialize(&mut executor);
+
+    println!(
+        "branches hit by initial corpus: {}/{}\n{}",
+        cov_corpus.total_coverage.len(),
+        executor
+            .count_branch_total(0)
+            .expect("checking branch count"),
+        cov_corpus
+    );
+
+    executor
+        ._main_loop(&mut cov_corpus, &mut engine)
+        .expect("executing main loop");
+
+    Ok(())
 }
