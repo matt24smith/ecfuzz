@@ -4,6 +4,7 @@
 **.gcno
 **.mutation
 **.out
+**.svg
 **a.out
 **json
 **profdata
@@ -11,7 +12,6 @@
 *.o
 *.out
 .DS_Store
-/output
 StandaloneFuzzTargetMain.c
 a.exp
 a.lib
@@ -26,6 +26,7 @@ init.profdata
 init.profraw
 input/*
 input/**
+output
 output.txt
 profdata
 profraw

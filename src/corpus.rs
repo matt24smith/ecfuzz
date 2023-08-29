@@ -187,7 +187,7 @@ impl Corpus {
         let _ = std::fs::remove_dir_all(&mutations);
         let _ = std::fs::remove_dir_all(&coverages);
 
-        for dir in [&output_dir, &mutations, &coverages] {
+        for dir in [output_dir, &mutations, &coverages] {
             if !dir.exists() {
                 std::fs::create_dir_all(dir).expect("creating dir");
             }

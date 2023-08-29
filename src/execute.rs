@@ -10,20 +10,20 @@
 //! export CFLAGS="-fsanitize=memory,undefined"
 //! ```
 //!
-//! Examples of options that can be passed to the compiler (with clang+tools installed in `/opt/bin`):
+//! Examples of options that can be passed to the compiler
 //! ```bash
-//! export CFLAGS="-O3 -mshstk -mllvm -polly -std=c17 -g -fcolor-diagnostics -fuse-ld=lld -L/opt/lib -D_FORTIFY_SOURCE=3 -fstack-protector-all -fcf-protection=full -fsanitize=memory,undefined,cfi -flto -fvisibility=hidden"
+//! export CFLAGS="-O3 -mshstk -mllvm -polly -std=c17 -g -fcolor-diagnostics -fuse-ld=lld -L/opt/lib -D_FORTIFY_SOURCE=3 -fstack-protector-all -fcf-protection=full -flto -fvisibility=hidden"
 //! ```
 //!
 //! Further reading:
 //! <https://clang.llvm.org/docs/ClangCommandLineReference.html>
 //! <https://developers.redhat.com/articles/2022/06/02/use-compiler-flags-stack-protection-gcc-and-clang>
 
-const CFLAGS_DEFAULTS: &str =
-    "-O3 -mshstk -std=c17 -g -fcolor-diagnostics -fuse-ld=lld -fstack-protector-all";
+const CFLAGS_DEFAULTS: &str = "-O3 -g -fcolor-diagnostics -fuse-ld=lld -fstack-protector-all";
 // also see:
 // <https://lldb.llvm.org/use/tutorial.html#starting-or-attaching-to-your-program>
 
+use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsString;
@@ -72,7 +72,7 @@ pub const SANITIZERS: &[&str] = &["address", "thread", "undefined"];
 pub const SANITIZERS: &[&str] = &["address", "undefined"];
 
 #[cfg(debug_assertions)]
-pub const SANITIZERS: &[&str] = &["undefined"];
+pub const SANITIZERS: &[&str] = &[""];
 
 pub struct Exec {
     pub cfg: Arc<Config>,
@@ -97,9 +97,14 @@ pub struct ReportFile {
 }
 
 fn compiled_executable_path(cfg: &Config, sanitizer: &str) -> String {
+    let exe_name: String = if sanitizer.is_empty() {
+        String::from("ecfuzz_target.out")
+    } else {
+        format!("ecfuzz_target.{}-sanitized.out", sanitizer)
+    };
     cfg.output_dir
         .as_path()
-        .join(format!("ecfuzz.{}-sanitized.out", sanitizer))
+        .join(exe_name)
         .display()
         .to_string()
 }
@@ -154,13 +159,24 @@ impl Exec {
             for target in &cfg.target_path {
                 setup_args.push(target.display().to_string());
             }
-            setup_args.push("-Wl,--whole-archive".to_string());
+
+            if !cfg.include.is_empty() {
+                #[cfg(not(target_os = "macos"))]
+                setup_args.push("-Wl,--whole-archive".to_string());
+                #[cfg(target_os = "macos")]
+                setup_args.push("-all_load".to_string());
+            }
+
             for inc in &cfg.include {
                 let mut include_string = inc.display().to_string();
                 include_string.insert_str(0, "-I");
                 setup_args.push(include_string);
             }
-            setup_args.push("-Wl,--no-whole-archive".to_string());
+
+            if !cfg.include.is_empty() {
+                #[cfg(not(target_os = "macos"))]
+                setup_args.push("-Wl,--no-whole-archive".to_string());
+            }
 
             println!(
                 "compiling...\n{} {}\n",
@@ -266,8 +282,8 @@ impl Exec {
         // crashlog
         let mut crash_corpus = Corpus::new();
         let branch_count = self.count_branch_total(0)?;
-        let save_corpus_dir = self.cfg.output_dir.join(Path::new("corpus")).to_path_buf();
-        let save_crashes_dir = self.cfg.output_dir.join(Path::new("crashes")).to_path_buf();
+        let save_corpus_dir = self.cfg.output_dir.join(Path::new("corpus"));
+        let save_crashes_dir = self.cfg.output_dir.join(Path::new("crashes"));
 
         // worker thread pool
         let (sender, receiver) = channel::<(usize, CorpusInput, ExecResult<Output>)>();
@@ -277,7 +293,9 @@ impl Exec {
             .num_threads(num_cpus)
             .build()
             .unwrap();
+
         assert!(num_cpus <= FUZZING_QUEUE_SIZE / 4);
+        assert!(self.cfg.iterations >= FUZZING_QUEUE_SIZE);
 
         // store finished fuzzing jobs here in the order they finish
         // this allows retrieval of jobs in a deterministic order
@@ -386,9 +404,9 @@ impl Exec {
                         stdout().flush().unwrap();
                         if corpus_entry.coverage.is_empty() {
                             eprintln!(
-                            "\nError: could not read coverage from crash! See output from sanitizer\n{}",
-                            String::from_utf8_lossy(&output.stderr)
-                            );
+                                        "\nError: could not read coverage from crash! See output from sanitizer\n{}",
+                                        String::from_utf8_lossy(&output.stderr)
+                                        );
                         }
                     }
                 }
@@ -399,13 +417,12 @@ impl Exec {
             } else if i == FUZZING_QUEUE_SIZE * 2 {
                 let exec_rate =
                     FUZZING_QUEUE_SIZE as f64 / (timer_start.elapsed().as_micros() as f64 / 1e6); // seconds
-                refresh_rate = (exec_rate / 24.0) as usize; // frames per second
+                refresh_rate = max(10, (exec_rate / 24.0) as usize); // frames per second
                 timer_start = Instant::now();
             } else if i % refresh_rate == 0 && refresh_rate > 0 && i <= self.cfg.iterations {
                 let exec_rate =
                     refresh_rate as f64 / (timer_start.elapsed().as_micros() as f64 / 1e6);
                 status = format!(
-                    //"\rcoverage: {:>2}/{}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8} {:<32}",
                     "\rcoverage: {:>5}/{:<5}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8}",
                     cov_corpus.total_coverage.len(),
                     branch_count,
@@ -413,7 +430,6 @@ impl Exec {
                     cov_corpus.inputs.len(),
                     crash_corpus.inputs.len(),
                     i,
-                    //String::from_utf8_lossy(&mutation.data.borrow()[0..min(32, mutation.data.borrow().len())]).replace("\n",""),
                     );
                 print!("{}", status);
                 stdout().flush().unwrap();
@@ -446,9 +462,13 @@ impl Exec {
         let _output = exec_target(&self.cfg, 0, &profraw, b"");
 
         self.index_target_report(&profraw, &profdata).unwrap();
+
+        #[cfg(not(debug_assertions))]
         remove_file(profraw).expect("removing raw profile data");
 
         let report: ReportFile = self.read_report(&profdata, sanitizer_idx)?;
+
+        #[cfg(not(debug_assertions))]
         remove_file(profdata).expect("removing coverage profile data");
 
         let mut n: u64 = 0;
@@ -475,7 +495,7 @@ impl Exec {
             "-sparse".to_string(),
             //"--instr".to_string(),
             raw_profile_filepath.display().to_string(),
-            "-o".to_string(),
+            "--output".to_string(),
             profile_filepath.display().to_string(),
         ];
         let prof_merge_result = Command::new(&self.cfg.llvm_profdata_path)
@@ -484,34 +504,37 @@ impl Exec {
             .expect("merge profile command");
         if !prof_merge_result.status.success() {
             panic!(
-                "Could not merge profile data. {}",
-                String::from_utf8_lossy(&prof_merge_result.stderr)
+                "Could not merge profile data. {} Args:\n{} {}\n",
+                String::from_utf8_lossy(&prof_merge_result.stderr),
+                &self.cfg.llvm_profdata_path.display(),
+                &prof_merge_args.join(" ")
             )
         }
         Ok(())
     }
 
-    /// deserialized indexed report data, and return branch coverage
+    /// deserialize indexed report data with llvm-cov, and return branch coverage
     fn read_report(
         &self,
         profile_filepath: &PathBuf,
         sanitizer_idx: usize,
     ) -> Result<ReportFile, Box<dyn std::error::Error>> {
-        let mut prof_report_args: Vec<String> = [
+        let prof_report_args: Vec<String> = [
             "export",
+            "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp",
+            "--check-binary-ids",
+            "--num-threads=1",
+            "--skip-expansions",
+            "--skip-functions",
             "--instr-profile",
             &profile_filepath.display().to_string(),
-            "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp", //"-check-binary-ids",
+            "--object",
+            &compiled_executable_path(&self.cfg, SANITIZERS[sanitizer_idx]),
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
 
-        prof_report_args.push("--object".to_string());
-        prof_report_args.push(compiled_executable_path(
-            &self.cfg,
-            SANITIZERS[sanitizer_idx],
-        ));
         let prof_report_result = Command::new(&self.cfg.llvm_cov_path)
             .args(&prof_report_args)
             .output()
@@ -594,7 +617,7 @@ fn log_crash_known(_stderr: &[u8], i: &usize, _crash_corpus: &Corpus) {
 fn exec_target(
     cfg: &Config,
     sanitizer_idx: usize,
-    raw_profile_filepath: &PathBuf,
+    raw_profile_filepath: &Path,
     input: &[u8],
 ) -> ExecResult<Output> {
     let executable = compiled_executable_path(cfg, SANITIZERS[sanitizer_idx]);
@@ -610,11 +633,15 @@ fn exec_target(
 /// execute the target program with test input sent to stdin
 fn exec_target_stdin(
     executable: &str,
-    raw_profile_filepath: &PathBuf,
+    raw_profile_filepath: &Path,
     input: &[u8],
 ) -> ExecResult<Output> {
+    let mut env_vars: Vec<(&str, &str)> =
+        Vec::from([("LLVM_PROFILE_FILE", raw_profile_filepath.to_str().unwrap())]);
+    #[cfg(target_os = "macos")]
+    env_vars.push(("MallocNanoZone", "0"));
     let mut profile_target = Command::new(PathBuf::from(".").join(executable))
-        .env("LLVM_PROFILE_FILE", raw_profile_filepath)
+        .envs(env_vars)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -623,16 +650,17 @@ fn exec_target_stdin(
     let send_input = profile_target.stdin.take().unwrap();
     let mut send_input = BufWriter::new(send_input);
 
-    let mut result = send_input.write_all(input);
-    if result.is_ok() {
-        result = send_input.flush();
-    }
+    send_input
+        .write_all(input)
+        .expect("sending input to instrumented target");
+    let result = send_input.flush();
 
     std::mem::drop(send_input);
 
     let output = profile_target.wait_with_output().unwrap();
 
-    if result.is_ok() && output.stderr.is_empty() {
+    //if result.is_ok() && output.stderr.is_empty() {
+    if result.is_ok() {
         ExecResult::Ok(output)
     } else {
         ExecResult::Err(output)
@@ -642,7 +670,7 @@ fn exec_target_stdin(
 /// execute the target program with test input sent via an input file
 fn exec_target_filein(
     executable: &str,
-    raw_profile_filepath: &PathBuf,
+    raw_profile_filepath: &Path,
     input: &[u8],
 ) -> ExecResult<Output> {
     let fname = format!("{}.mutation", current().name().unwrap());
@@ -651,9 +679,13 @@ fn exec_target_filein(
 
     std::mem::drop(f);
 
+    let mut env_vars: Vec<(&str, &str)> =
+        Vec::from([("LLVM_PROFILE_FILE", raw_profile_filepath.to_str().unwrap())]);
+    #[cfg(target_os = "macos")]
+    env_vars.push(("MallocNanoZone", "0"));
+
     let profile_target = Command::new(executable)
-        .env("LLVM_PROFILE_FILE", raw_profile_filepath)
-        //.args(["--mutation-file", &fname])
+        .envs(env_vars)
         .arg(&fname)
         .stderr(Stdio::piped())
         .spawn()
@@ -672,7 +704,7 @@ fn exec_target_filein(
 /// execute the target program with test input sent via program arguments
 pub fn exec_target_args(
     executable: &str,
-    raw_profile_filepath: &PathBuf,
+    raw_profile_filepath: &Path,
     input: &[u8],
 ) -> ExecResult<Output> {
     let mut args: Vec<Vec<_>> = vec![];
@@ -700,8 +732,13 @@ pub fn exec_target_args(
     #[cfg(target_os = "windows")]
     let os_args: Vec<OsString> = args.iter().map(|a| OsStringExt::from_wide(a)).collect();
 
+    let mut env_vars: Vec<(&str, &str)> =
+        Vec::from([("LLVM_PROFILE_FILE", raw_profile_filepath.to_str().unwrap())]);
+    #[cfg(target_os = "macos")]
+    env_vars.push(("MallocNanoZone", "0"));
+
     let profile_target = Command::new(executable)
-        .env("LLVM_PROFILE_FILE", raw_profile_filepath)
+        .envs(env_vars)
         .args(os_args)
         .stderr(Stdio::piped())
         .spawn()

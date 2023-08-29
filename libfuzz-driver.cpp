@@ -11,7 +11,6 @@ send input via stdin instead of an input file
 #include <string.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <math.h>
 
 
 extern "C" int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size);

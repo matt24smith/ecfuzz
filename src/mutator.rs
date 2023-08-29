@@ -318,7 +318,7 @@ impl Mutation {
         for key in keys {
             let keyidx = self.hashfunc() % self.dict.as_ref().unwrap().get(&key).unwrap().len();
             let val: Vec<u8> = self.dict.as_ref().unwrap().get(&key).unwrap()[keyidx].to_vec();
-            let indices: Vec<usize> = byte_index(&key.to_vec(), &self.data.borrow().to_vec());
+            let indices: Vec<usize> = byte_index(&key.to_vec(), &self.data.borrow());
             if indices.is_empty() {
                 continue;
             }
