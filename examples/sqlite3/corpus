@@ -1,0 +1,6 @@
+select time();
+CREATE TABLE IF NOT EXISTS fuzzed (column_1 int PRIMARY KEY, column_2 text NOT NULL, column_3 blob DEFAULT 0) WITHOUT ROWID;
+INSERT INTO fuzzed VALUES (1, "helo", "helo2");
+--comment
+/*C-style comment*/
+create table t(s);PRAGMA writable_schema=ON;UPDATE sqlite_master SET sql='ANALYZE;CREATE VIRTUAL TABLE t USING fts3;DROP TABLE t;DROP TABLE EXISTS t';PRAGMA r;SAVEPOINT T;ANALYZE;ROLLBACK;SAVEPOINT E;DROP TABLE IF EXISTS t;

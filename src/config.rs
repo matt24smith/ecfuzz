@@ -6,11 +6,11 @@ use crate::mutator::main as mutate_stdin;
 use crate::mutator::Mutation;
 
 const HELPTXT: &str = r#"
-Mutate {}
+{}
 
 Options:
 
-  -d, --dictionary-path <file>  Optionally supply a dictionary to enable random
+  -d, --dictionary-path <path>  Optionally supply a dictionary to enable random
                                 dictionary value insertion, and tokenized
                                 dictionary replacement
 
@@ -26,7 +26,11 @@ Options:
                                 to './ecfuzz-worker-N.mutation' instead of the
                                 target stdin
 
-  -t, --target <fuzz_target.c>  Clang input file. Defaults to '{}'
+  -t, --target <path>           Clang input file
+
+  -I, --include <dir>           Include directory in compilation paths list
+
+  --output-dir <dir>            Output corpus directory. Defaults to '{}'
 
   -x, --compiler <path>         Compiler path. Defaults to '{}'
 
@@ -36,37 +40,36 @@ Options:
 
   -i, --iterations <N>          Total number of executions. Default {}
 
-  -c, --corpus <file>           Initial corpus file, entries separated by newlines.
+  -c, --corpus <path>           Initial corpus file, entries separated by newlines.
                                 Defaults to ./input/corpus. May be repeated
 
-  -C, --corpus-dir <directory>  Initialize corpus from a directory of files, one
+  -C, --corpus-dir <dir>        Initialize corpus from a directory of files, one
                                 entry per file. May be repeated for multiple directories
 
-  -o, --object <path>           Object file given to llvm-cov. Defaults to '{}'.
-                                May be repeated for multiple files.
-
-  -O, --object-files <path1...> Object files given to llvm-cov. Can be specified
-                                as a list of object files or by shell expansion
-
 Pass additional args to the compiler by setting $CFLAGS
+
+Environment variables with the 'ECFUZZ_' prefix, capital letters, and
+underscores will override these settings:
+    export ECFUZZ_CORPUS_DIRS="./output/mutations/mutation/ ./output/crashes/mutation/"
 "#;
 
 #[derive(Clone)]
 pub struct Config {
     pub cc_path: PathBuf,
-    pub iter_check: usize,
+    pub corpus_dirs: Vec<PathBuf>,
+    pub corpus_files: Vec<PathBuf>,
+    pub dict_path: Option<PathBuf>,
+    pub include: Vec<PathBuf>,
     pub iterations: usize,
     pub llvm_cov_path: PathBuf,
     pub llvm_profdata_path: PathBuf,
-    pub target_path: PathBuf,
-    pub dict_path: Option<PathBuf>,
-    pub corpus_files: Vec<PathBuf>,
-    pub corpus_dirs: Vec<PathBuf>,
-    pub seed: Vec<u8>,
-    pub objects: Vec<PathBuf>,
-    pub mutate_file: bool,
-    pub mutate_args: bool,
     pub multiplier: Option<f64>,
+    pub mutate_args: bool,
+    pub mutate_file: bool,
+    pub objects: Vec<PathBuf>,
+    pub output_dir: PathBuf,
+    pub seed: Vec<u8>,
+    pub target_path: Vec<PathBuf>,
 }
 
 /// target executor configurations: clang executable path, set CFLAGS variable,
@@ -75,24 +78,20 @@ impl Config {
     /// returns CLI help text including platform-specific defaults
     pub fn help(mut mutator: Mutation) -> String {
         let defaults = Config::defaults();
-        mutator.data = defaults
-            .target_path
-            .as_os_str()
-            .to_str()
-            .unwrap()
+        mutator.data = "ECFuzz: Evolutionary Coverage-guided Fuzzer"
             .as_bytes()
-            .to_vec();
+            .to_vec()
+            .into();
         mutator.mutate();
-        let header: String = String::from_utf8_lossy(&mutator.data).to_string();
+        let header: String = String::from_utf8_lossy(&mutator.data.borrow()).to_string();
         let mut help = HELPTXT.to_owned();
         for arg in [
             &header,
-            defaults.target_path.as_os_str().to_str().unwrap(),
-            defaults.cc_path.as_os_str().to_str().unwrap(),
-            defaults.llvm_profdata_path.as_os_str().to_str().unwrap(),
-            defaults.llvm_cov_path.as_os_str().to_str().unwrap(),
-            format!("{}", defaults.iterations).as_ref(),
-            defaults.objects[0].as_os_str().to_str().unwrap(),
+            &defaults.output_dir.display().to_string(),
+            &defaults.cc_path.display().to_string(),
+            &defaults.llvm_profdata_path.display().to_string(),
+            &defaults.llvm_cov_path.display().to_string(),
+            &format!("{}", defaults.iterations),
         ] {
             help = help.replacen("{}", arg, 1);
         }
@@ -102,9 +101,18 @@ impl Config {
     /// initialize target execution config with default values
     pub fn defaults() -> Self {
         Config {
-            iter_check: 100, // frequency of printed status updates
+            corpus_dirs: Vec::new(),
+            corpus_files: Vec::new(),
+            dict_path: None,
+            include: Vec::new(),
             iterations: 10000,
-            target_path: PathBuf::from("./fuzz_target.c"),
+            multiplier: Some(0.01),
+            mutate_args: false,
+            mutate_file: false,
+            objects: Vec::new(),
+            output_dir: PathBuf::from("output"),
+            seed: Vec::new(),
+            target_path: Vec::new(),
 
             // default paths for Linux
             #[cfg(target_os = "linux")]
@@ -133,14 +141,6 @@ impl Config {
             #[cfg(target_os = "windows")]
             llvm_cov_path: PathBuf::from(r"C:\Program Files\LLVM\bin\llvm-cov.exe"),
 
-            dict_path: None,
-            seed: Vec::new(),
-            corpus_files: Vec::new(),
-            corpus_dirs: Vec::new(),
-            objects: vec![PathBuf::from("a.out")],
-            mutate_file: false,
-            mutate_args: false,
-            multiplier: Some(0.01),
         }
     }
 
@@ -163,9 +163,6 @@ impl Config {
                 "ECFUZZ_ITERATIONS" => {
                     self.iterations = v.parse().expect("parsing $ECFUZZ_ITERATIONS as usize")
                 }
-                "ECFUZZ_ITER_CHECK" => {
-                    self.iter_check = v.parse().expect("parsing $ECFUZZ_ITER_CHECK as usize")
-                }
                 "ECFUZZ_LLVM_COV_PATH" => self.llvm_cov_path = PathBuf::from(v),
                 "ECFUZZ_LLVM_PROFDATA_PATH" => self.llvm_profdata_path = PathBuf::from(v),
                 "ECFUZZ_MULTIPLIER" => {
@@ -176,6 +173,7 @@ impl Config {
                 "ECFUZZ_OBJECTS" => {
                     self.objects = v.split_whitespace().map(PathBuf::from).collect()
                 }
+                "ECFUZZ_OUTPUT_DIR" => self.output_dir = PathBuf::from(v),
                 "ECFUZZ_SEED" => self.seed = v.into_bytes(),
                 _ => {
                     panic!("unknown env option {}", k)
@@ -205,7 +203,7 @@ impl Config {
             let t = (SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap())
-            .as_secs()
+            .as_micros()
             .to_string();
             let mutator = Mutation::with_seed(None, t.as_bytes().to_vec(), None);
             println!("{}", Config::help(mutator));
@@ -219,7 +217,10 @@ impl Config {
             .filter(|a| !a.is_empty() && a.starts_with('-'))
             .collect();
         for arg in args.iter().filter(|a| a.starts_with('-')) {
-            if !known_args.iter().any(|a| a.contains(arg)) {
+            if !known_args
+                .iter()
+                .any(|a| a.contains(arg) || (arg.len() > 2 && &arg[0..2] == "-I"))
+            {
                 eprintln!("\x1b[91mWarning\x1b[0m: unknown argument {}", arg);
             }
         }
@@ -264,8 +265,8 @@ impl Config {
                 if arg == "-t" || arg == "--target" {
                     stop = true
                 } else if stop {
-                    cfg.target_path = PathBuf::from(arg);
-                    break;
+                    cfg.target_path.push(PathBuf::from(arg));
+                    stop = false;
                 }
             }
         }
@@ -357,25 +358,31 @@ impl Config {
             }
         }
 
-        if args.contains(&"-o".to_string()) || args.contains(&"--object".to_string()) {
+        for arg in &args {
+            if arg.len() > 2 && &arg[0..2] == "-I" {
+                cfg.include.push(PathBuf::from(&arg[2..]));
+            }
+        }
+        if args.contains(&"-I".to_string()) || args.contains(&"--include".to_string()) {
             let mut stop = false;
             for arg in &args {
-                if arg == "-o" || arg == "--object" {
+                if arg == "-I" || arg == "--include" {
                     stop = true
                 } else if stop {
-                    cfg.objects.push(PathBuf::from(arg));
+                    cfg.include.push(PathBuf::from(arg));
                     stop = false
                 }
             }
         }
-        if args.contains(&"-O".to_string()) || args.contains(&"--object-files".to_string()) {
+
+        if args.contains(&"--output-dir".to_string()) {
             let mut stop = false;
             for arg in &args {
-                if arg == "-O" || arg == "--object-files" {
+                if arg == "--output-dir" {
                     stop = true;
-                } else if stop && arg[..1] != *"-" {
-                    cfg.objects.push(PathBuf::from(arg));
-                } else {
+                } else if stop {
+                    cfg.output_dir = PathBuf::from(arg);
+                    std::fs::create_dir_all(&cfg.output_dir)?;
                     stop = false;
                 }
             }

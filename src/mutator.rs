@@ -20,6 +20,7 @@
 //!
 //!```
 
+use std::cell::RefCell;
 use std::cmp::max;
 use std::collections::btree_map::Entry::Vacant;
 use std::collections::BTreeMap;
@@ -51,23 +52,35 @@ Example:
 
 "#;
 
+type Mutators = Vec<for<'r> fn(&'r mut Mutation) -> Result<(), MutationError>>;
+
 /// Mutation engine.
 /// input to be mutated is stored in data.
 /// If a dictionary map is given, dict keys will be inserted if the values
 /// are empty, otherwise values will be used for tokenized key replacement.
 /// Can be iinitialized with a different hashing seed and multiplier
 pub struct Mutation {
-    pub data: Vec<u8>,
+    pub data: RefCell<Vec<u8>>,
     pub dict: Option<BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
     hasher: Xxh3,
     hash_seed: [u8; 4],
-    mutators: Vec<for<'r> fn(&'r mut Mutation) -> Result<(), ()>>,
+    mutators: Mutators,
     multiplier: f64,
 }
 
+#[derive(Debug)]
+pub struct MutationError;
+
+impl std::fmt::Display for MutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid mutation")
+    }
+}
+
+impl std::error::Error for MutationError {}
+
 /// Magic values consist of a tuple with byte size and a bytestring.
 /// Variants can be 1, 2, or 4 bytes length.
-#[derive(Copy, Clone)]
 enum Magic {
     A((u8, [u8; 1])),
     B((u8, [u8; 2])),
@@ -111,13 +124,13 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
     let lines = read(&dict_path)
         .unwrap_or_else(|_| panic!("could not load dictionary from file! {:?}", dict_path))
         .split(|x| x == &b'\n')
+        .filter(|x| !x.is_empty() && x[0] != b'#')
         .map(|x| x.to_vec())
         .collect::<Vec<Vec<u8>>>();
 
     for line in lines {
-        if line.is_empty() {
-            continue;
-        }
+        #[cfg(debug_assertions)]
+        assert!(!line.is_empty());
         let key: Vec<u8>;
         let val: Vec<u8>;
         let keypair = line
@@ -130,13 +143,15 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
             val = keypair[1].to_owned();
             #[cfg(debug_assertions)]
             println!(
-                "token {:?} {:?}",
+                "  token replace {:?} {:?}",
                 String::from_utf8_lossy(&key),
                 String::from_utf8_lossy(&val)
             );
         } else {
             key = b"".to_vec();
             val = keypair[0].to_owned();
+            #[cfg(debug_assertions)]
+            println!("  splice: {:?}", String::from_utf8_lossy(&val));
         }
 
         if let Vacant(_e) = dict.entry(key.clone()) {
@@ -147,7 +162,7 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
     }
     println!(
         "loaded dictionary: {}",
-        dict_path.as_os_str().to_str().unwrap()
+        dict_path.as_os_str().to_str().unwrap(),
     );
     dict
 }
@@ -157,6 +172,7 @@ impl Mutation {
     /// Multiplier specifies mutations per byte, some float ranging from 0 to 1.
     /// If multiplier is None, a value of 0.01 will be used for one mutation
     /// per 100 bytes
+
     pub fn new(dict_path: Option<PathBuf>, multiplier: Option<f64>) -> Self {
         let mut mutators = [
             Mutation::mutate_magic,
@@ -186,7 +202,7 @@ impl Mutation {
 
         {
             Mutation {
-                data: vec![],
+                data: RefCell::new(Vec::new()),
                 dict,
                 hasher: Xxh3::with_seed(0),
                 hash_seed: [0x0_u8, 0x0_u8, 0x0_u8, 0x0_u8],
@@ -232,40 +248,40 @@ impl Mutation {
 
     /// magic number mutation
     /// splices data with random magic value
-    pub fn mutate_magic(&mut self) -> Result<(), ()> {
+    pub fn mutate_magic(&mut self) -> Result<(), MutationError> {
         let (mut n_size, n) = self.magic_char();
-        if n_size > self.data.len() {
-            n_size = self.data.len();
+        if n_size > self.data.borrow().len() {
+            n_size = self.data.borrow().len();
         }
-        let mut sz: usize = self.data.len() - n_size;
+        let mut sz: usize = self.data.borrow().len() - n_size;
         if sz == 0 {
             sz = 1
         }
         #[cfg(debug_assertions)]
         assert!(sz > 0);
         let idx = self.hashfunc() % sz;
-        self.data.splice(idx..idx + n_size, n);
+        self.data.borrow_mut().splice(idx..idx + n_size, n);
         Ok(())
     }
 
     /// XOR mutation and bitshift
-    pub fn mutate_bits(&mut self) -> Result<(), ()> {
-        let bit = self.hashfunc() % (self.data.len() * 8);
+    pub fn mutate_bits(&mut self) -> Result<(), MutationError> {
+        let bit = self.hashfunc() % (self.data.borrow().len() * 8);
         let idx_bit: usize = bit % 8;
         let idx_byte: usize = bit / 8;
-        self.data[idx_byte] ^= 1 << idx_bit;
+        self.data.borrow_mut()[idx_byte] ^= 1 << idx_bit;
         Ok(())
     }
 
     /// replace randomly selected bytes with random data of equivalent length
-    pub fn mutate_bytes(&mut self) -> Result<(), ()> {
-        let dataidx = self.hashfunc() % self.data.len();
-        self.data[dataidx] = (self.hashfunc() % 256) as u8;
+    pub fn mutate_bytes(&mut self) -> Result<(), MutationError> {
+        let dataidx = self.hashfunc() % self.data.borrow().len();
+        self.data.borrow_mut()[dataidx] = (self.hashfunc() % 256) as u8;
         Ok(())
     }
 
     /// random dictionary insertion
-    pub fn mutate_dictionary(&mut self) -> Result<(), ()> {
+    pub fn mutate_dictionary(&mut self) -> Result<(), MutationError> {
         let val_idx = self.hashfunc()
             % self
                 .dict
@@ -277,17 +293,17 @@ impl Mutation {
         let val: Vec<u8> =
             self.dict.as_ref().unwrap().get(&b"".to_vec()).unwrap()[val_idx].to_vec();
         //let idx = self.hashfunc() % ((self.data.len() - val.len()) - 1);
-        if self.data.len() > val.len() {
-            let idx = self.hashfunc() % (self.data.len() - val.len());
-            self.data.splice(idx..idx + val.len(), val);
+        if self.data.borrow().len() > val.len() {
+            let idx = self.hashfunc() % (self.data.borrow().len() - val.len());
+            self.data.borrow_mut().splice(idx..idx + val.len(), val);
         } else {
-            self.data = val;
+            self.data = RefCell::from(val);
         };
         Ok(())
     }
 
     /// tokenized dictionary replacement
-    pub fn mutate_dictionary_replacement(&mut self) -> Result<(), ()> {
+    pub fn mutate_dictionary_replacement(&mut self) -> Result<(), MutationError> {
         let mut keys = self
             .dict
             .as_ref()
@@ -302,25 +318,26 @@ impl Mutation {
         for key in keys {
             let keyidx = self.hashfunc() % self.dict.as_ref().unwrap().get(&key).unwrap().len();
             let val: Vec<u8> = self.dict.as_ref().unwrap().get(&key).unwrap()[keyidx].to_vec();
-            let indices: Vec<usize> = byte_index(&key.to_vec(), &self.data.to_vec());
+            let indices: Vec<usize> = byte_index(&key.to_vec(), &self.data.borrow());
             if indices.is_empty() {
                 continue;
             }
             let idx = indices[self.hashfunc() % indices.len()];
-            self.data.splice(idx..(idx + key.len()), val);
+            self.data.borrow_mut().splice(idx..(idx + key.len()), val);
             return Ok(());
         }
         #[cfg(debug_assertions)]
         eprintln!(
             "no matching tokens in corpus for {}! skipping...",
-            String::from_utf8_lossy(&self.data),
+            String::from_utf8_lossy(&self.data.borrow()),
         );
-        Err(())
+        Err(MutationError)
     }
 
     /// applies a random mutator to input
     pub fn mutate(&mut self) {
-        for _mutate in 0..max(1, (self.data.len() as f64 * self.multiplier) as usize) {
+        let data_len = self.data.borrow().len();
+        for _mutate in 0..max(1, (data_len as f64 * self.multiplier) as usize) {
             let mut hash: usize = self.hashfunc() % self.mutators.len();
             while self.mutators[hash](self).is_err() {
                 hash = self.hashfunc() % self.mutators.len();
@@ -391,9 +408,9 @@ pub fn main() -> Result<(), std::io::Error> {
     }
 
     let mut mutation = Mutation::with_seed(dictpath, seed, multiplier);
-    mutation.data = input;
+    mutation.data = RefCell::new(input);
     mutation.mutate();
-    let _w = writer.write(&mutation.data).unwrap();
+    let _w = writer.write(&mutation.data.borrow()).unwrap();
     writer.flush().unwrap();
 
     Ok(())
@@ -411,11 +428,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mutations() -> Result<(), ()> {
+    fn test_mutations() -> Result<(), MutationError> {
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
 
         let mut mutation = Mutation::new(None, None);
-        mutation.data = test;
+        mutation.data = RefCell::new(test);
 
         mutation.mutate_magic()?;
         let magicmutated = mutation.data.clone();
@@ -434,20 +451,20 @@ mod tests {
 
         println!(
             "magic:\t\t{}\nxor + bitshift:\t{}\nbyte replace:\t{}\nrandom:\t\t{}\n\t\t{}\n\t\t{}\n\t\t{}",
-            vec2string(magicmutated.clone()),
-            vec2string(bitmutated.clone()),
-            vec2string(randommutated.clone()),
-            vec2string(anymutated.clone()),
-            vec2string(anymutated1.clone()),
-            vec2string(anymutated2.clone()),
-            vec2string(anymutated3.clone()),
+            vec2string(magicmutated.borrow().to_vec()),
+            vec2string(bitmutated.borrow().to_vec()),
+            vec2string(randommutated.borrow().to_vec()),
+            vec2string(anymutated.borrow().to_vec()),
+            vec2string(anymutated1.borrow().to_vec()),
+            vec2string(anymutated2.borrow().to_vec()),
+            vec2string(anymutated3.borrow().to_vec()),
             );
 
         let mut f = File::create("output.txt").unwrap();
-        f.write_all(&magicmutated).unwrap();
-        f.write_all(&bitmutated).unwrap();
-        f.write_all(&randommutated).unwrap();
-        f.write_all(&anymutated).unwrap();
+        f.write_all(&magicmutated.borrow()).unwrap();
+        f.write_all(&bitmutated.borrow()).unwrap();
+        f.write_all(&randommutated.borrow()).unwrap();
+        f.write_all(&anymutated.borrow()).unwrap();
 
         Ok(())
     }
@@ -463,17 +480,19 @@ mod tests {
     }
 
     #[test]
-    fn test_dict() -> Result<(), ()> {
+    fn test_dict() {
         let dictpath = PathBuf::from("tests/sample.dict");
         let mut mutation = Mutation::new(Some(dictpath), None);
 
         let test: Vec<u8> = b"The quick brown fox jumped over the lazy dog".to_vec();
-        mutation.data = test.clone();
+        mutation.data = RefCell::new(test);
 
-        mutation.mutate_dictionary_replacement()?;
-        mutation.mutate_dictionary_replacement()?;
+        mutation.mutate_dictionary_replacement().unwrap();
+        mutation.mutate_dictionary_replacement().unwrap();
 
-        println!("tokenized:\t{}", String::from_utf8_lossy(&mutation.data));
-        Ok(())
+        println!(
+            "tokenized:\t{}",
+            String::from_utf8_lossy(&mutation.data.borrow())
+        );
     }
 }

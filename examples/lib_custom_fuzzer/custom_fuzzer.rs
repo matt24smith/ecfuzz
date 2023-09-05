@@ -54,7 +54,7 @@ impl MyTargetInput {
 
         // serialized input format
         CorpusInput {
-            data: bytes,
+            data: bytes.into(),
             coverage,
             lifetime: 0,
         }
@@ -64,7 +64,7 @@ impl MyTargetInput {
     pub fn deserialize(serialized: &CorpusInput) -> Self {
         let mut bytesplit: Vec<Vec<u8>> = vec![];
         let mut cstring: Vec<u8> = vec![];
-        for b in &serialized.data {
+        for b in &serialized.data.borrow().to_vec() {
             if b != &b'\0' {
                 cstring.push(*b);
             } else {
@@ -152,11 +152,11 @@ impl MyFuzzEngine {
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
             self.mutation_engine.mutate();
-            while self.mutation_engine.data.contains(&b'\0') {
+            while self.mutation_engine.data.borrow().contains(&b'\0') {
                 self.mutation_engine.mutate();
             }
         };
-        self.data.str1 = CString::new(self.mutation_engine.data.clone()).unwrap();
+        self.data.str1 = CString::new(self.mutation_engine.data.borrow().to_vec()).unwrap();
         self
     }
     fn mutate_string_2(mut self) -> Self {
@@ -166,11 +166,11 @@ impl MyFuzzEngine {
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
             self.mutation_engine.mutate();
-            while self.mutation_engine.data.contains(&b'\0') {
+            while self.mutation_engine.data.borrow().contains(&b'\0') {
                 self.mutation_engine.mutate();
             }
         };
-        self.data.str2 = CString::new(self.mutation_engine.data.clone()).unwrap();
+        self.data.str2 = CString::new(self.mutation_engine.data.borrow().to_vec()).unwrap();
         self
     }
     fn mutate_string_3(mut self) -> Self {
@@ -179,11 +179,11 @@ impl MyFuzzEngine {
         .data
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
-            while self.mutation_engine.data.contains(&b'\0') {
+            while self.mutation_engine.data.borrow().contains(&b'\0') {
                 self.mutation_engine.mutate();
             }
         };
-        self.data.str3 = CString::new(self.mutation_engine.data.clone()).unwrap();
+        self.data.str3 = CString::new(self.mutation_engine.data.borrow().to_vec()).unwrap();
         self
     }
 
@@ -211,22 +211,21 @@ impl MyFuzzEngine {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sets clang compiler and llvm tools paths to default settings
     let mut cfg = Config::defaults();
-    cfg.iter_check = 20;
-    cfg.target_path = PathBuf::from("./examples/lib_custom_fuzzer/example.c");
+    cfg.target_path = Vec::from([PathBuf::from("./examples/lib_custom_fuzzer/example.c")]);
     cfg.iterations = 10_000;
     cfg.objects = vec![PathBuf::from("./a.out")];
     cfg.mutate_args = true;
     cfg.load_env();
 
-    // compile target with instrumentation
-    let exec = Exec::initialize(cfg)?;
-
     // create new mutation engine and corpus, seed the corpus with zeros
-    let mut engine = MyFuzzEngine::new();
+    let mut my_engine = MyFuzzEngine::new();
 
     println!("done initialize");
     let mut cov_corpus = Corpus::new();
     let mut crash_corpus = Corpus::new();
+
+    // compile target with instrumentation
+    let mut exec = Exec::initialize(cfg)?;
 
     let seed = MyTargetInput {
         num1: 0,
@@ -246,14 +245,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..exec.cfg.iterations {
         // deserialize mutation inputs stored in the corpus
         let idx = i % cov_corpus.inputs.len();
-        let input_raw: CorpusInput = cov_corpus.inputs[idx].clone();
-        engine.data = MyTargetInput::deserialize(&input_raw);
+        //let input_raw: CorpusInput = cov_corpus.inputs[idx];
+        let input_raw = CorpusInput {
+            data: cov_corpus.inputs[idx].data.clone(),
+            coverage: cov_corpus.inputs[idx].coverage.clone(),
+            lifetime: cov_corpus.inputs[idx].lifetime,
+        };
+        my_engine.data = MyTargetInput::deserialize(&input_raw);
 
         // apply a mutation
-        engine = engine.mutate(cov_corpus.total_coverage.len());
-        let mutated = engine.data.clone();
+        my_engine.mutate(cov_corpus.total_coverage.len());
+        let mutated = my_engine.data.clone();
 
-        let mutation_trial = CorpusInput {
+        let mut mutation_trial = CorpusInput {
             data: mutated
                 .clone()
                 .serialize(cov_corpus.inputs[idx].coverage.clone())
@@ -264,7 +268,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // run the program with mutated inputs
-        let (entry, output) = exec.trial(&mutation_trial, 0);
+        //let (entry, output) = exec.trial(&mut mutation_trial);
+        let output: ExecResult<std::process::Output> =
+            exec.trial(&mut mutation_trial, my_engine.mutation_engine.hashfunc());
 
         let output = match output {
             ExecResult::Ok(o) => o,
@@ -273,20 +279,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // add inputs yielding new coverage to the corpus
         //if !cov_corpus.total_coverage.is_superset(&coverage) {
-        if output.stderr.is_empty() && !cov_corpus.total_coverage.is_superset(&entry.coverage) {
-            let corpus_entry = engine.data.serialize(entry.coverage);
+        if output.stderr.is_empty()
+            && !cov_corpus
+                .total_coverage
+                .is_superset(&mutation_trial.coverage)
+        {
+            let corpus_entry = my_engine.data.clone().serialize(mutation_trial.coverage);
             out.write_all(&[b'\r'])?;
             cov_corpus.add_and_distill_corpus(corpus_entry);
             println!("\nnew entry! {}", cov_corpus);
         } else if !output.stderr.is_empty() {
-            let corpus_entry = engine.data.serialize(entry.coverage);
+            //let my_engine_data_clone = my_engine.data.clone();
+            //let corpus_entry = my_engine_data_clone.serialize(mutation_trial.coverage);
+            /*
+            let corpus_entry = CorpusInput {
+            coverage: &
+            data: &my_engine.data.serialize(mutation_trial.coverage).data,
+            };
+            */
+            let corpus_entry = my_engine.data.clone().serialize(mutation_trial.coverage);
             out.write_all(&[b'\r'])?;
             crash_corpus.add_and_distill_corpus(corpus_entry);
             eprintln!("\ncrashed! {}", crash_corpus);
         }
 
         // log some status messages every 100 execs
-        if i % exec.cfg.iter_check == 0 && i > 0 {
+        if i % 100 == 0 && i > 0 {
             //let branch_count = count_branch_total(&cfg, profdata)?;
             let status_msg = format!(
                 //"\r{:0>3} {:0>3} {:0>4}  {: >10}  {: >10}\t{: >10}  branches: {}/{}  exec/s {:.2}  i: {}",
@@ -299,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 String::from_utf8_lossy(&mutated.str3.as_bytes().to_vec()),
                 cov_corpus.total_coverage.len(),
                 //branch_count,
-                exec.cfg.iter_check as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
+                100.0 as f32 / (timer_start.elapsed().as_millis() as f32 / 1000.0),
                 i
                 );
             timer_start = Instant::now();
@@ -309,8 +327,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // save the results
-    cov_corpus.save(PathBuf::from("examples/lib_custom_fuzzer/output/corpus/"))?;
-    crash_corpus.save(PathBuf::from("examples/lib_custom_fuzzer/output/crashes/"))?;
+    cov_corpus.save(&PathBuf::from("examples/lib_custom_fuzzer/output/corpus/"))?;
+    crash_corpus.save(&PathBuf::from("examples/lib_custom_fuzzer/output/crashes/"))?;
 
     Ok(())
 }

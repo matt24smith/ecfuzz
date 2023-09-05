@@ -20,7 +20,7 @@ Mutated results are output to stdout.
 ```bash
 cargo install ecfuzz
 ecfuzz --help
-ecfuzz --help | tail -n+4 | ecfuzz --mutate-stdin --seed 1
+echo 'Hello world!' | ecfuzz --mutate-stdin --seed 0
 ```
 
 See examples below for a demonstration of how source code coverage is measured for a preset number of mutations.
@@ -74,6 +74,7 @@ ecfuzz \
     --dictionary-path ./examples/cli/input/sample.dict \
     --seed 0 \
     --iterations 10000
+
 ```
 
 Results will be deterministic as long as the inputs (and ecfuzz version) remain unchanged.
