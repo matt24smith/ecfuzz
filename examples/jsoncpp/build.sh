@@ -11,11 +11,14 @@ mkdir -p input
 git -C input/jsoncpp pull || git clone https://github.com/open-source-parsers/jsoncpp input/jsoncpp
 
 # clang build options
-export CC="/opt/bin/clang"
-export CXX="/opt/bin/clang++"
-export CFLAGS="-O3 -mllvm -polly -g -fcolor-diagnostics -fuse-ld=lld -fcoverage-mapping -fprofile-instr-generate"
+#export CC="/opt/bin/clang"
+#export LDFLAGS="-L./input/jsoncpp/build/lib/libjsoncpp.a -Wl,--whole-archive"
+#export CXX="/opt/bin/clang++"
+export CC=/usr/bin/clang
+export CXX=/usr/bin/clang++
+export CFLAGS="-O3 -g -fcolor-diagnostics -fcoverage-mapping -fprofile-instr-generate -fuse-ld=ld"
 export CXXFLAGS=$CFLAGS
-export LDFLAGS="-L./input/jsoncpp/build/lib/libjsoncpp.a -Wl,--whole-archive"
+export LDFLAGS="-fuse-ld=ld"
 
 
 # build library to link against

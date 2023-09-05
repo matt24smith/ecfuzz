@@ -25,9 +25,6 @@ pub fn begin() -> Result<(), Box<dyn Error>> {
     let mut engine = Mutation::with_seed(cfg.dict_path.clone(), cfg.seed.clone(), cfg.multiplier);
     let mut executor = Exec::initialize(cfg).expect("preparing execution context");
 
-    // coverage profile paths
-    println!("seeding...");
-
     // load corpus into memory
     for filepath in &executor.cfg.corpus_files {
         cov_corpus.append(Corpus::load(filepath).expect("reading corpus file"))
@@ -35,6 +32,9 @@ pub fn begin() -> Result<(), Box<dyn Error>> {
     for filepath in &executor.cfg.corpus_dirs {
         cov_corpus.append(Corpus::load(filepath).expect("reading corpus dir"))
     }
+
+    // coverage profile paths
+    println!("seeding {} inputs...", cov_corpus.inputs.len());
 
     // check initial corpus coverage
     cov_corpus.initialize(&mut executor);

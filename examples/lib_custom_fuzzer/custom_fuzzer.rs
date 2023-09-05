@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::{c_uint, CString};
 use std::io::{stdout, Write};
@@ -219,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cfg.load_env();
 
     // create new mutation engine and corpus, seed the corpus with zeros
-    let mut engine = MyFuzzEngine::new();
+    let mut my_engine = MyFuzzEngine::new();
 
     println!("done initialize");
     let mut cov_corpus = Corpus::new();
@@ -252,11 +251,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             coverage: cov_corpus.inputs[idx].coverage.clone(),
             lifetime: cov_corpus.inputs[idx].lifetime,
         };
-        engine.data = MyTargetInput::deserialize(&input_raw);
+        my_engine.data = MyTargetInput::deserialize(&input_raw);
 
         // apply a mutation
-        engine.mutate(cov_corpus.total_coverage.len());
-        let mutated = engine.data.clone();
+        my_engine.mutate(cov_corpus.total_coverage.len());
+        let mutated = my_engine.data.clone();
 
         let mut mutation_trial = CorpusInput {
             data: mutated
@@ -271,7 +270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // run the program with mutated inputs
         //let (entry, output) = exec.trial(&mut mutation_trial);
         let output: ExecResult<std::process::Output> =
-            exec.trial(&mut mutation_trial, engine.mutation_engine.hashfunc());
+            exec.trial(&mut mutation_trial, my_engine.mutation_engine.hashfunc());
 
         let output = match output {
             ExecResult::Ok(o) => o,
@@ -285,20 +284,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .total_coverage
                 .is_superset(&mutation_trial.coverage)
         {
-            let corpus_entry = engine.data.clone().serialize(mutation_trial.coverage);
+            let corpus_entry = my_engine.data.clone().serialize(mutation_trial.coverage);
             out.write_all(&[b'\r'])?;
             cov_corpus.add_and_distill_corpus(corpus_entry);
             println!("\nnew entry! {}", cov_corpus);
         } else if !output.stderr.is_empty() {
-            //let engine_data_clone = engine.data.clone();
-            //let corpus_entry = engine_data_clone.serialize(mutation_trial.coverage);
+            //let my_engine_data_clone = my_engine.data.clone();
+            //let corpus_entry = my_engine_data_clone.serialize(mutation_trial.coverage);
             /*
             let corpus_entry = CorpusInput {
-                coverage: &
-                data: &engine.data.serialize(mutation_trial.coverage).data,
+            coverage: &
+            data: &my_engine.data.serialize(mutation_trial.coverage).data,
             };
             */
-            let corpus_entry = engine.data.clone().serialize(mutation_trial.coverage);
+            let corpus_entry = my_engine.data.clone().serialize(mutation_trial.coverage);
             out.write_all(&[b'\r'])?;
             crash_corpus.add_and_distill_corpus(corpus_entry);
             eprintln!("\ncrashed! {}", crash_corpus);

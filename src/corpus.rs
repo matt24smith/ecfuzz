@@ -12,14 +12,14 @@ use crate::execute::{Exec, ExecResult};
 /// to be tested, as well as the resulting branch coverage set and some metadata
 pub struct CorpusInput {
     pub data: RefCell<Vec<u8>>,
-    pub coverage: HashSet<u64>,
+    pub coverage: HashSet<u128>,
     pub lifetime: u64,
 }
 
 /// corpus contains a vector of corpus inputs, and the total branch coverage set
 pub struct Corpus {
     pub inputs: Vec<CorpusInput>,
-    pub total_coverage: HashSet<u64>,
+    pub total_coverage: HashSet<u128>,
 }
 
 impl CorpusInput {
@@ -35,13 +35,13 @@ impl CorpusInput {
     /// Serialize the test input to an output directory for logging.
     /// Two files will be created: a .mutation file containing the mutated
     /// input, and a .coverage file containing the set of code branches hit
-    fn serialize(
+    pub fn serialize(
         &self,
         mutation_dir: &Path,
         coverage_dir: &Path,
         output_name: &str,
     ) -> Result<(), std::io::Error> {
-        let mut hits = self.coverage.clone().drain().collect::<Vec<u64>>();
+        let mut hits = self.coverage.clone().drain().collect::<Vec<u128>>();
         hits.sort();
         let hit_str = hits
             .iter()
@@ -60,8 +60,8 @@ impl CorpusInput {
         let mut cov_path = coverage_dir.join(output_name);
         cov_path.set_extension("coverage");
 
-        File::create(fpath)
-            .expect("creating fpath")
+        File::create(&fpath)
+            .unwrap_or_else(|e| panic!("{}: {}", e, fpath.display()))
             .write_all(&self.data.borrow())
             .expect("writing mutation to file");
         File::create(cov_path.clone())
@@ -83,30 +83,22 @@ impl Corpus {
     }
 
     /// add a new entry into the corpus
-    pub fn add(&mut self, input: CorpusInput) {
-        for branch in &input.coverage {
-            self.total_coverage.insert(*branch);
-        }
-        self.inputs.push(input);
+    pub fn add(&mut self, new_input: CorpusInput) {
+        self.total_coverage.extend(&new_input.coverage);
+        self.inputs.push(new_input);
     }
 
     /// add a new entry into the corpus.
     /// Each time an entry is added, the corpus will be distilled:
     /// all corpus entries with branch coverage that is a
     /// subset of the newest coverage will be pruned
-    pub fn add_and_distill_corpus(&mut self, new_input: CorpusInput) {
-        let diff: Vec<u64> = new_input
-            .coverage
-            .difference(&self.total_coverage)
-            .copied()
-            .collect();
-        for branch in diff {
-            self.total_coverage.insert(branch);
-        }
+    pub fn add_and_distill_corpus(&mut self, new: CorpusInput) {
+        self.total_coverage.extend(&new.coverage);
 
         self.inputs
-            .retain(|i| !new_input.coverage.is_superset(&i.coverage));
-        self.inputs.push(new_input);
+            .retain(|i| !new.coverage.is_superset(&i.coverage));
+
+        self.inputs.push(new);
     }
 
     /// Load a corpus of inputs from a single file, separated by newlines.
@@ -193,7 +185,8 @@ impl Corpus {
             }
         }
 
-        println!("\rsaving to {:#} ... {:<70}", output_dir.display(), "");
+        //println!("\rsaving to {:#} ... {:<70}", output_dir.display(), "");
+
         let mut outputs: Vec<&CorpusInput> = self.inputs.iter().collect();
         outputs.sort_by(|a, b| b.coverage.len().cmp(&a.coverage.len()));
 
@@ -303,6 +296,7 @@ mod tests {
         assert!(!corpus.inputs.is_empty());
 
         let mut cfg = Config::defaults();
+        cfg.load_env();
         cfg.target_path = Vec::from([PathBuf::from("./examples/cli/fuzz_target.c")]);
 
         // compile target with instrumentation

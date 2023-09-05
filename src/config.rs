@@ -198,9 +198,6 @@ impl Config {
             }
         }
 
-        #[cfg(debug_assertions)]
-        println!("got args: {:#?}", args);
-
         // print help text
         if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
             let t = (SystemTime::now()
