@@ -34,17 +34,17 @@ use std::fs::remove_file;
 #[cfg(debug_assertions)]
 use std::io::Read;
 use std::io::{stdout, BufRead, BufReader, BufWriter, Write};
-#[cfg(target_os = "linux")]
-use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::{ffi::OsStringExt, process::ExitStatusExt};
 #[cfg(target_os = "windows")]
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::{ffi::OsStringExt, process::ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
-use std::thread::{available_parallelism, current};
+use std::thread::{available_parallelism, current, Builder, JoinHandle};
 use std::time::Instant;
 
 use rayon::ThreadPoolBuilder;
@@ -149,100 +149,113 @@ impl Exec {
                     .modified()
                     .expect("reading modification time for target source file")
             })
-            //.filter(|m| m.is_ok())
-            //.map(|m| m.expect("reading modification for target source file"))
             .reduce(max)
             .unwrap();
 
+        let mut handles: Vec<JoinHandle<_>> = Vec::new();
+
         // use a variety of available sanitizers when possible
         for sanitizer in SANITIZERS {
-            let sanitizer_arg = format!("-fsanitize={}", sanitizer);
-            let compiled_path = compiled_executable_path(&cfg, sanitizer);
+            let cflags = cflags.clone();
+            let cfg = cfg.clone();
+            let latest_modified = *latest_modified;
+            let compile_thread = Builder::new()
+                .name(format!("ecfuzz-compile-{}-", sanitizer))
+                .spawn(move || {
+                    let sanitizer_arg = format!("-fsanitize={}", sanitizer);
+                    let compiled_path = compiled_executable_path(&cfg, sanitizer);
 
-            //if PathBuf::from(compiled_path).is_file() && std::fs::metadata
-            if compiled_path.is_file()
-                && &std::fs::metadata(&compiled_path)
-                    .unwrap()
-                    .modified()
-                    .unwrap()
-                    > latest_modified
-            {
-                println!(
-                    "target binary {} newer than target source, skipping compilation...",
-                    compiled_path.display()
-                );
-                continue;
-            }
+                    //if PathBuf::from(compiled_path).is_file() && std::fs::metadata
+                    if compiled_path.is_file()
+                        && std::fs::metadata(&compiled_path)
+                            .unwrap()
+                            .modified()
+                            .unwrap()
+                            > latest_modified
+                    {
+                        println!(
+                            "target binary {} newer than target source, skipping compilation...",
+                            compiled_path.display()
+                        );
+                        return;
+                    }
 
-            let mut setup_args: Vec<String> = [
-                "-o",
-                &compiled_path.display().to_string(),
-                &sanitizer_arg,
-                "-flto=thin",
-                "-fvisibility=hidden",
-                "-fprofile-instr-generate",
-                "-fcoverage-mapping",
-                "-fno-optimize-sibling-calls",
-                "-fno-omit-frame-pointer",
-                #[cfg(target_arch = "aarch64")]
-                "-arch",
-                #[cfg(target_arch = "aarch64")]
-                "arm64",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+                    let mut setup_args: Vec<String> = [
+                        "-o",
+                        &compiled_path.display().to_string(),
+                        &sanitizer_arg,
+                        "-flto=thin",
+                        "-fvisibility=hidden",
+                        "-fprofile-instr-generate",
+                        "-fcoverage-mapping",
+                        "-fno-optimize-sibling-calls",
+                        "-fno-omit-frame-pointer",
+                        #[cfg(target_arch = "aarch64")]
+                        "-arch",
+                        #[cfg(target_arch = "aarch64")]
+                        "arm64",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
 
-            for flag in &cflags {
-                setup_args.push(flag.to_string());
-            }
-            for target in &cfg.target_path {
-                setup_args.push(target.display().to_string());
-            }
+                    for flag in &cflags {
+                        setup_args.push(flag.to_string());
+                    }
+                    for target in &cfg.target_path {
+                        setup_args.push(target.display().to_string());
+                    }
 
-            if !cfg.include.is_empty() {
-                #[cfg(not(target_os = "macos"))]
-                setup_args.push("-Wl,--whole-archive".to_string());
-                #[cfg(target_os = "macos")]
-                setup_args.push("-all_load".to_string());
-            }
+                    if !cfg.include.is_empty() {
+                        #[cfg(not(target_os = "macos"))]
+                        setup_args.push("-Wl,--whole-archive".to_string());
+                        #[cfg(target_os = "macos")]
+                        setup_args.push("-all_load".to_string());
+                    }
 
-            for inc in &cfg.include {
-                let mut include_string = inc.display().to_string();
-                include_string.insert_str(0, "-I");
-                setup_args.push(include_string);
-            }
+                    for inc in &cfg.include {
+                        let mut include_string = inc.display().to_string();
+                        include_string.insert_str(0, "-I");
+                        setup_args.push(include_string);
+                    }
 
-            if !cfg.include.is_empty() {
-                #[cfg(not(target_os = "macos"))]
-                setup_args.push("-Wl,--no-whole-archive".to_string());
-            }
+                    if !cfg.include.is_empty() {
+                        #[cfg(not(target_os = "macos"))]
+                        setup_args.push("-Wl,--no-whole-archive".to_string());
+                    }
 
-            println!(
-                "compiling...\n{} {}\n",
-                &cfg.cc_path.display().to_string(),
-                setup_args.join(" ")
-            );
+                    println!(
+                        "compiling...\n{} {}\n",
+                        &cfg.cc_path.display().to_string(),
+                        setup_args.join(" ")
+                    );
 
-            let setup_result = Command::new(&cfg.cc_path)
-                .args(setup_args)
-                .output()
-                .expect("compiling instrumented target");
-            if !setup_result.stderr.is_empty()
-                && !byte_index(&b"error: ".to_vec(), &setup_result.stderr.to_vec()).is_empty()
-            {
-                panic!(
-                    "compile failed:\n{}\n{}",
-                    String::from_utf8(setup_result.stdout)?,
-                    String::from_utf8(setup_result.stderr)?,
-                );
-            } else if !setup_result.stderr.is_empty() {
-                eprintln!(
-                    "compiled with warnings:\n{}\n{}",
-                    String::from_utf8(setup_result.stdout)?,
-                    String::from_utf8(setup_result.stderr)?,
-                );
-            }
+                    let setup_result = Command::new(&cfg.cc_path)
+                        .args(setup_args)
+                        .output()
+                        .expect("compiling instrumented target");
+                    if !setup_result.stderr.is_empty()
+                        && !byte_index(&b"error: ".to_vec(), &setup_result.stderr.to_vec())
+                            .is_empty()
+                    {
+                        panic!(
+                            "compile failed:\n{}\n{}",
+                            String::from_utf8(setup_result.stdout).unwrap(),
+                            String::from_utf8(setup_result.stderr).unwrap(),
+                        );
+                    } else if !setup_result.stderr.is_empty() {
+                        eprintln!(
+                            "compiled with warnings:\n{}\n{}",
+                            String::from_utf8(setup_result.stdout).unwrap(),
+                            String::from_utf8(setup_result.stderr).unwrap(),
+                        );
+                    }
+                })
+                .unwrap();
+            handles.push(compile_thread);
+        }
+        for handle in handles {
+            handle.join().unwrap();
         }
         println!("done compiling");
 
@@ -282,7 +295,24 @@ impl Exec {
         let cov = match self.check_report_coverage(&profdata, sanitizer_idx) {
             CoverageResult::Ok(cov) => cov,
             CoverageResult::Err() => {
-                assert!(matches!(output, ExecResult::Err(_)));
+                //assert!(matches!(output, ExecResult::Err(_)));
+                /*
+                if let ExecResult::Ok(err_out) = output {
+                panic!("{}", err_out.status.code().unwrap());
+                }
+                */
+                assert!(match &output {
+                    ExecResult::Err(_) => true,
+                    ExecResult::Ok(_o) => {
+                        eprintln!(
+                            "\ncrashing input: {}\nresult: {}\noutput status: {}",
+                            test_input,
+                            String::from_utf8_lossy(&_o.stderr),
+                            _o.status.code().unwrap()
+                        );
+                        _o.status.code().unwrap() == 1
+                    }
+                });
                 test_input.coverage.clone()
             }
         };
@@ -555,8 +585,8 @@ impl Exec {
         let prof_report = Command::new(&self.cfg.llvm_cov_path)
             .args([
                 "export",
-                "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp",
-                "--check-binary-ids",
+                "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp|StandaloneFuzzTargetMain.c",
+                //"--check-binary-ids",
                 "--num-threads=1",
                 "--skip-expansions",
                 "--skip-functions",
@@ -582,10 +612,6 @@ impl Exec {
 
         remove_file(profdata).expect("removing coverage profile data");
 
-        //let branch_count = parse_report_cov(&prof_report.stdout).unwrap();
-        //Ok(branch_count.len() as u64)
-        //let report: Report = serde_json::from_slice(&prof_report.stdout).unwrap();
-        //Ok(report.data[0].totals.branches.count.into())
         let mut branches: HashSet<u128> = HashSet::new();
         let mut file_index = 0;
         let lines = prof_report.stdout.split(|byte| byte == &b'\n');
@@ -639,7 +665,7 @@ impl Exec {
             .args([
                 "export",
                 "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp",
-                "--check-binary-ids",
+                //"--check-binary-ids",
                 "--num-threads=1",
                 "--skip-expansions",
                 "--skip-functions",
@@ -690,12 +716,7 @@ impl Exec {
             let block: u64 = linenumber_block_expr_count[1].parse::<u64>().unwrap();
 
             let branch0 = cantor_pair(line_num, block);
-            //let branch1 = cantor_pair(block, expr);
             let branch = cantor_pair_u128(branch0.into(), file_index);
-
-            //println!("LINE {}", line);
-            //#[cfg(debug_assertions)]
-            //assert!(!cov.contains(&branch.try_into().unwrap()));
 
             cov.insert(branch);
         }
@@ -762,138 +783,96 @@ fn exec_target(
     let executable = compiled_executable_path(cfg, SANITIZERS[sanitizer_idx])
         .display()
         .to_string();
-    if cfg.mutate_file {
-        exec_target_filein(&executable, raw_profile_filepath, input)
-    } else if cfg.mutate_args {
-        exec_target_args(&executable, raw_profile_filepath, input)
-    } else {
-        exec_target_stdin(&executable, raw_profile_filepath, input)
-    }
-}
 
-/// execute the target program with test input sent to stdin
-fn exec_target_stdin(
-    executable: &str,
-    raw_profile_filepath: &Path,
-    input: &[u8],
-) -> ExecResult<Output> {
+    // target input args
+    // if --mutate-file is used, the first argument will be the mutated filepath
+    let mut args: Vec<String> = Vec::new();
+
+    // fuzz target environment variables
+
+    #[allow(unused_mut)]
     let mut env_vars: Vec<(&str, &str)> =
         Vec::from([("LLVM_PROFILE_FILE", raw_profile_filepath.to_str().unwrap())]);
+    // malloc nano zone needs to be disabled for ASAN on mac
     #[cfg(target_os = "macos")]
     env_vars.push(("MallocNanoZone", "0"));
-    let mut profile_target = Command::new(PathBuf::from(".").join(executable))
+
+    // mutation input file (only used for --mutate-file)
+    let fname = format!("{}.mutation", current().name().unwrap());
+
+    if cfg.mutate_file {
+        // execute the target program with test input sent via an input file
+        let mut f = BufWriter::new(std::fs::File::create(&fname).unwrap());
+        f.write_all(input).unwrap();
+        std::mem::drop(f);
+        args.push(fname.clone());
+    }
+
+    if cfg.mutate_args {
+        let mut fuzzy_args: Vec<Vec<_>> = Vec::new();
+        let mut cursor: Vec<_> = Vec::new();
+
+        for b in input {
+            if b == &b'\0' {
+                fuzzy_args.push(cursor);
+                cursor = Vec::new();
+            } else {
+                cursor.push(*b);
+            }
+        }
+        if !cursor.is_empty() {
+            fuzzy_args.push(cursor);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        let os_args: Vec<OsString> = fuzzy_args
+            .iter()
+            .map(|a| OsStringExt::from_vec(a.to_vec()))
+            .collect();
+
+        // windows OsString arguments are utf-16, so need to use from_wide()
+        #[cfg(target_os = "windows")]
+        let os_args: Vec<OsString> = fuzzy_args
+            .iter()
+            .map(|a| OsStringExt::from_wide(a))
+            .collect();
+
+        let _ = os_args
+            .iter()
+            .map(|a| args.push(a.to_str().unwrap().to_string()));
+    }
+
+    let mut profile_target = Command::new(PathBuf::from(".").join(&executable))
         .envs(env_vars)
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("Running target executable {}\n{}", executable, e));
 
-    let send_input = profile_target.stdin.take().unwrap();
-    let mut send_input = BufWriter::new(send_input);
+    let mut send_input_result: std::io::Result<()> = Ok(());
 
-    send_input
-        .write_all(input)
-        .expect("sending input to instrumented target");
-    let result = send_input.flush();
+    if !cfg.mutate_file && !cfg.mutate_args {
+        // execute the target program with test input sent to stdin
+        let send_input = profile_target.stdin.take().unwrap();
+        let mut send_input = BufWriter::new(send_input);
 
-    std::mem::drop(send_input);
+        send_input
+            .write_all(input)
+            .expect("sending input to instrumented target");
+        send_input_result = send_input.flush();
+
+        std::mem::drop(send_input);
+    }
 
     let output = profile_target.wait_with_output().unwrap();
 
-    if result.is_ok() && output.status.code().is_some() {
-        ExecResult::Ok(output)
-    } else {
-        ExecResult::Err(output)
-    }
-}
-
-/// execute the target program with test input sent via an input file
-fn exec_target_filein(
-    executable: &str,
-    raw_profile_filepath: &Path,
-    input: &[u8],
-) -> ExecResult<Output> {
-    let fname = format!("{}.mutation", current().name().unwrap());
-    let mut f = BufWriter::new(std::fs::File::create(&fname).unwrap());
-    f.write_all(input).unwrap();
-
-    std::mem::drop(f);
-
-    let mut env_vars: Vec<(&str, &str)> =
-        Vec::from([("LLVM_PROFILE_FILE", raw_profile_filepath.to_str().unwrap())]);
-
-    #[cfg(target_os = "macos")]
-    env_vars.push(("MallocNanoZone", "0"));
-
-    let profile_target = Command::new(executable)
-        .envs(env_vars)
-        .arg(&fname)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let result = profile_target.wait_with_output().unwrap();
-
-    remove_file(fname).expect("removing input mutation file");
-
-    if result.status.code().is_some() {
-        ExecResult::Ok(result)
-    } else {
-        ExecResult::Err(result)
-    }
-}
-
-/// execute the target program with test input sent via program arguments
-pub fn exec_target_args(
-    executable: &str,
-    raw_profile_filepath: &Path,
-    input: &[u8],
-) -> ExecResult<Output> {
-    let mut args: Vec<Vec<_>> = vec![];
-    let mut cursor: Vec<_> = Vec::new();
-
-    for b in input {
-        if b == &b'\0' {
-            args.push(cursor);
-            cursor = Vec::new();
-        } else {
-            cursor.push(*b);
-        }
-    }
-    if !cursor.is_empty() {
-        args.push(cursor);
+    if cfg.mutate_file {
+        remove_file(fname).expect("removing input mutation file");
     }
 
-    #[cfg(not(target_os = "windows"))]
-    let os_args: Vec<OsString> = args
-        .iter()
-        .map(|a| OsStringExt::from_vec(a.to_vec()))
-        .collect();
-
-    // windows OsString arguments are utf-16, so need to use from_wide()
-    #[cfg(target_os = "windows")]
-    let os_args: Vec<OsString> = args.iter().map(|a| OsStringExt::from_wide(a)).collect();
-
-    let mut env_vars: Vec<(&str, &str)> =
-        Vec::from([("LLVM_PROFILE_FILE", raw_profile_filepath.to_str().unwrap())]);
-    #[cfg(target_os = "macos")]
-    env_vars.push(("MallocNanoZone", "0"));
-
-    let profile_target = Command::new(executable)
-        .envs(env_vars)
-        .args(os_args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    let output = profile_target.wait_with_output().unwrap();
-
-    //if let Ok(out) = output {
-    if output.status.code().is_some() {
+    if send_input_result.is_ok() && output.status.code() == Some(0) {
         ExecResult::Ok(output)
     } else {
         ExecResult::Err(output)

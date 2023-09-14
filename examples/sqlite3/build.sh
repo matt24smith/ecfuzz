@@ -9,7 +9,7 @@ mkdir -p input/sqlite3_build
 
 wget -O input/sqlite-src.zip https://www.sqlite.org/2023/sqlite-src-3430000.zip
 
-rm -rf input/sqlite-src-* input/sqlite3_build || echo ''
+rm -rf input/sqlite-src-* input/sqlite3_build || echo 'nothing to remove, skipping...'
 unzip -d input/ input/sqlite-src.zip
 mkdir input/sqlite3_build
 
@@ -19,7 +19,7 @@ mkdir input/sqlite3_build
 #export CC=/usr/bin/clang
 #export CXX=/usr/bin/clang++
 
-export CFLAGS="-O3 -g -fcolor-diagnostics -fcoverage-mapping -fprofile-instr-generate -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_LOAD_EXTENSION=0 -DSQLITE_NO_SYNC -DSQLITE_OMIT_RANDOMNESS"
+export CFLAGS="-O3 -g -fcolor-diagnostics -fcoverage-mapping -fprofile-instr-generate -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_LOAD_EXTENSION=0 -DSQLITE_NO_SYNC -DSQLITE_OMIT_RANDOMNESS"
 
 #export CFLAGS="-O3 -g -fcolor-diagnostics -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_LOAD_EXTENSION=0 -DSQLITE_NO_SYNC -DSQLITE_OMIT_RANDOMNESS"
 export CXXFLAGS=$CFLAGS
