@@ -21,6 +21,11 @@ pub fn begin() -> Result<(), Box<dyn Error>> {
     cfg.load_env();
     let mut cov_corpus = Corpus::new();
 
+    let ch_dir = &cfg.output_dir.clone();
+
+    println!("setting execution directory: {}\n", ch_dir.display());
+    std::env::set_current_dir(ch_dir)?;
+
     // compile target
     let mut engine = Mutation::with_seed(cfg.dict_path.clone(), cfg.seed.clone(), cfg.multiplier);
     let mut executor = Exec::initialize(cfg).expect("preparing execution context");

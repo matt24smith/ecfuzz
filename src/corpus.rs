@@ -10,6 +10,7 @@ use crate::execute::{Exec, ExecResult};
 
 /// each test input sent to the target program contains the byte vector
 /// to be tested, as well as the resulting branch coverage set and some metadata
+#[derive(Clone)]
 pub struct CorpusInput {
     pub data: RefCell<Vec<u8>>,
     pub coverage: HashSet<u128>,
@@ -172,16 +173,17 @@ impl Corpus {
 
     /// append corpus entries to the corpus file.
     /// a .coverage file will also be created with branch coverage info
-    pub fn save(&self, output_dir: &PathBuf) -> std::io::Result<()> {
+    pub fn save(&self, output_dir: &Path) -> std::io::Result<()> {
         let mutations: PathBuf = output_dir.join("mutation");
         let coverages: PathBuf = output_dir.join("coverage");
 
-        let _ = std::fs::remove_dir_all(&mutations);
-        let _ = std::fs::remove_dir_all(&coverages);
-
-        for dir in [output_dir, &mutations, &coverages] {
+        for dir in [&mutations, &coverages] {
             if !dir.exists() {
                 std::fs::create_dir_all(dir).expect("creating dir");
+            } else {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    std::fs::remove_file(entry.unwrap().path()).unwrap();
+                }
             }
         }
 

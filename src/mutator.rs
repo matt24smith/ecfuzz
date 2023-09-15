@@ -62,7 +62,7 @@ type Mutators = Vec<for<'r> fn(&'r mut Mutation) -> Result<(), MutationError>>;
 pub struct Mutation {
     pub data: RefCell<Vec<u8>>,
     pub dict: Option<BTreeMap<Vec<u8>, Vec<Vec<u8>>>>,
-    hasher: Xxh3,
+    hasher: Box<Xxh3>,
     hash_seed: [u8; 4],
     mutators: Mutators,
     multiplier: f64,
@@ -102,9 +102,13 @@ const MAGIC_VALUES: &[&Magic; 10] = &[
 
 /// find all indices of matching substring in a raw binary vector
 pub fn byte_index(key: &Vec<u8>, bytes: &Vec<u8>) -> Vec<usize> {
-    assert!(key.len() <= bytes.len());
+    //assert!(key.len() <= bytes.len());
 
     let mut indices: Vec<usize> = vec![];
+
+    if key.len() > bytes.len() {
+        return indices;
+    }
 
     for i in 0..(bytes.len() - key.len()) + 1 {
         if &bytes[i..i + key.len()] == key {
@@ -204,7 +208,7 @@ impl Mutation {
             Mutation {
                 data: RefCell::new(Vec::new()),
                 dict,
-                hasher: Xxh3::with_seed(0),
+                hasher: Box::new(Xxh3::with_seed(0)),
                 hash_seed: [0x0_u8, 0x0_u8, 0x0_u8, 0x0_u8],
                 mutators,
                 multiplier: multiplier.unwrap_or(0.01),
@@ -254,9 +258,8 @@ impl Mutation {
             n_size = self.data.borrow().len();
         }
         let mut sz: usize = self.data.borrow().len() - n_size;
-        if sz == 0 {
-            sz = 1
-        }
+        //if sz == 0 { sz = 1 }
+        sz += 1;
         #[cfg(debug_assertions)]
         assert!(sz > 0);
         let idx = self.hashfunc() % sz;
@@ -292,10 +295,11 @@ impl Mutation {
                 .len();
         let val: Vec<u8> =
             self.dict.as_ref().unwrap().get(&b"".to_vec()).unwrap()[val_idx].to_vec();
-        //let idx = self.hashfunc() % ((self.data.len() - val.len()) - 1);
         if self.data.borrow().len() > val.len() {
-            let idx = self.hashfunc() % (self.data.borrow().len() - val.len());
-            self.data.borrow_mut().splice(idx..idx + val.len(), val);
+            //let idx = self.hashfunc() % (self.data.borrow().len() - val.len());
+            let idx = self.hashfunc() % self.data.borrow().len() + 1;
+            let remove_count = self.hashfunc() % val.len();
+            self.data.borrow_mut().splice(idx..idx + remove_count, val);
         } else {
             self.data = RefCell::from(val);
         };
@@ -338,10 +342,14 @@ impl Mutation {
     pub fn mutate(&mut self) {
         let data_len = self.data.borrow().len();
         for _mutate in 0..max(1, (data_len as f64 * self.multiplier) as usize) {
-            let mut hash: usize = self.hashfunc() % self.mutators.len();
-            while self.mutators[hash](self).is_err() {
-                hash = self.hashfunc() % self.mutators.len();
-            }
+            let hash: usize = self.hashfunc() % self.mutators.len();
+            //while self.mutators[hash](self).is_err() {
+            //    hash = self.hashfunc() % self.mutators.len();
+            //}
+            self.mutators[hash](self).unwrap_or_else(|e| {
+                panic!("{}\nmutator: {:#?}", e, hash);
+            });
+            //{ hash = self.hashfunc() % self.mutators.len(); }
         }
     }
 }
@@ -489,9 +497,11 @@ mod tests {
 
         mutation.mutate_dictionary_replacement().unwrap();
         mutation.mutate_dictionary_replacement().unwrap();
+        mutation.mutate_dictionary().unwrap();
+        mutation.mutate_dictionary().unwrap();
 
         println!(
-            "tokenized:\t{}",
+            "2 token and 2 splice replacements :\t{}",
             String::from_utf8_lossy(&mutation.data.borrow())
         );
     }

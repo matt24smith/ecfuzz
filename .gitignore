@@ -36,3 +36,4 @@ profdata
 profraw
 sample*.json
 target
+seed.sh

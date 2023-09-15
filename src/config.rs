@@ -1,4 +1,5 @@
 use std::env::vars;
+use std::fs::canonicalize;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -46,6 +47,8 @@ Options:
   -C, --corpus-dir <dir>        Initialize corpus from a directory of files, one
                                 entry per file. May be repeated for multiple directories
 
+  -p, --plaintext               Output status messages in plaintext
+
 Pass additional args to the compiler by setting $CFLAGS
 
 Environment variables with the 'ECFUZZ_' prefix, capital letters, and
@@ -68,6 +71,7 @@ pub struct Config {
     pub mutate_file: bool,
     pub objects: Vec<PathBuf>,
     pub output_dir: PathBuf,
+    pub plaintext: bool,
     pub seed: Vec<u8>,
     pub target_path: Vec<PathBuf>,
 }
@@ -110,9 +114,10 @@ impl Config {
             mutate_args: false,
             mutate_file: false,
             objects: Vec::new(),
-            output_dir: PathBuf::from("output"),
+            output_dir: canonicalize(PathBuf::from("output")).unwrap(),
             seed: Vec::new(),
             target_path: Vec::new(),
+            plaintext: false,
 
             // default paths for Linux
             #[cfg(target_os = "linux")]
@@ -152,9 +157,13 @@ impl Config {
         {
             println!("{}={}", k, v);
             match k.as_ref() {
-                "ECFUZZ_CC_PATH" => self.cc_path = PathBuf::from(v),
+                "ECFUZZ_CC_PATH" => self.cc_path = canonicalize(PathBuf::from(v)).unwrap(),
                 "ECFUZZ_CORPUS_DIRS" => {
-                    self.corpus_dirs = v.split_whitespace().map(PathBuf::from).collect()
+                    self.corpus_dirs = v
+                        .split_whitespace()
+                        .map(PathBuf::from)
+                        .map(|p| canonicalize(p).unwrap())
+                        .collect()
                 }
                 "ECFUZZ_CORPUS_FILES" => {
                     self.corpus_files = v.split_whitespace().map(PathBuf::from).collect()
@@ -163,8 +172,12 @@ impl Config {
                 "ECFUZZ_ITERATIONS" => {
                     self.iterations = v.parse().expect("parsing $ECFUZZ_ITERATIONS as usize")
                 }
-                "ECFUZZ_LLVM_COV_PATH" => self.llvm_cov_path = PathBuf::from(v),
-                "ECFUZZ_LLVM_PROFDATA_PATH" => self.llvm_profdata_path = PathBuf::from(v),
+                "ECFUZZ_LLVM_COV_PATH" => {
+                    self.llvm_cov_path = canonicalize(PathBuf::from(v)).unwrap()
+                }
+                "ECFUZZ_LLVM_PROFDATA_PATH" => {
+                    self.llvm_profdata_path = canonicalize(PathBuf::from(v)).unwrap()
+                }
                 "ECFUZZ_MULTIPLIER" => {
                     self.multiplier = Some(v.parse().expect("parsing $ECFUZZ_MULTIPLIER as f64"))
                 }
@@ -234,6 +247,9 @@ impl Config {
         if args.contains(&"-f".to_string()) || args.contains(&"--mutate-file".to_string()) {
             cfg.mutate_file = true;
         }
+        if args.contains(&"-p".to_string()) || args.contains(&"--plaintext".to_string()) {
+            cfg.plaintext = true;
+        }
 
         if args.contains(&"-d".to_string()) || args.contains(&"--dictionary-path".to_string()) {
             let mut stop = false;
@@ -241,7 +257,7 @@ impl Config {
                 if arg == "-d" || arg == "--dictionary-path" {
                     stop = true;
                 } else if stop {
-                    cfg.dict_path = Some(PathBuf::from(arg));
+                    cfg.dict_path = Some(canonicalize(PathBuf::from(arg)).unwrap());
                     break;
                 }
             }
@@ -265,7 +281,8 @@ impl Config {
                 if arg == "-t" || arg == "--target" {
                     stop = true
                 } else if stop {
-                    cfg.target_path.push(PathBuf::from(arg));
+                    cfg.target_path
+                        .push(canonicalize(PathBuf::from(arg)).unwrap());
                     stop = false;
                 }
             }
@@ -277,7 +294,7 @@ impl Config {
                 if arg == "-x" || arg == "--compiler" {
                     stop = true
                 } else if stop {
-                    cfg.cc_path = PathBuf::from(arg);
+                    cfg.cc_path = canonicalize(PathBuf::from(arg)).unwrap();
                     break;
                 }
             }
@@ -289,7 +306,7 @@ impl Config {
                 if arg == "--llvm-profdata-path" {
                     stop = true
                 } else if stop {
-                    cfg.llvm_profdata_path = PathBuf::from(arg);
+                    cfg.llvm_profdata_path = canonicalize(PathBuf::from(arg)).unwrap();
                     break;
                 }
             }
@@ -300,7 +317,7 @@ impl Config {
                 if arg == "--llvm-cov-path" {
                     stop = true
                 } else if stop {
-                    cfg.llvm_cov_path = PathBuf::from(arg);
+                    cfg.llvm_cov_path = canonicalize(PathBuf::from(arg)).unwrap();
                     break;
                 }
             }
@@ -338,7 +355,8 @@ impl Config {
                 if arg == "-c" || arg == "--corpus" {
                     stop = true
                 } else if stop {
-                    cfg.corpus_files.push(PathBuf::from(arg));
+                    cfg.corpus_files
+                        .push(canonicalize(PathBuf::from(arg)).unwrap());
                     stop = false
                 }
             }
@@ -352,7 +370,8 @@ impl Config {
                 if arg == "-C" || arg == "--corpus-dir" {
                     stop = true
                 } else if stop {
-                    cfg.corpus_dirs.push(PathBuf::from(arg));
+                    cfg.corpus_dirs
+                        .push(canonicalize(PathBuf::from(arg)).unwrap());
                     stop = false
                 }
             }
@@ -360,7 +379,8 @@ impl Config {
 
         for arg in &args {
             if arg.len() > 2 && &arg[0..2] == "-I" {
-                cfg.include.push(PathBuf::from(&arg[2..]));
+                cfg.include
+                    .push(canonicalize(PathBuf::from(&arg[2..])).unwrap());
             }
         }
         if args.contains(&"-I".to_string()) || args.contains(&"--include".to_string()) {
@@ -369,7 +389,7 @@ impl Config {
                 if arg == "-I" || arg == "--include" {
                     stop = true
                 } else if stop {
-                    cfg.include.push(PathBuf::from(arg));
+                    cfg.include.push(canonicalize(PathBuf::from(arg)).unwrap());
                     stop = false
                 }
             }
@@ -381,7 +401,7 @@ impl Config {
                 if arg == "--output-dir" {
                     stop = true;
                 } else if stop {
-                    cfg.output_dir = PathBuf::from(arg);
+                    cfg.output_dir = canonicalize(PathBuf::from(arg)).unwrap();
                     std::fs::create_dir_all(&cfg.output_dir)?;
                     stop = false;
                 }
@@ -389,7 +409,8 @@ impl Config {
         }
 
         if cfg.corpus_dirs.is_empty() && cfg.corpus_files.is_empty() {
-            cfg.corpus_files.push(PathBuf::from("./input/corpus"));
+            cfg.corpus_files
+                .push(canonicalize(PathBuf::from("./input/corpus")).unwrap());
         }
         Ok(cfg)
     }
