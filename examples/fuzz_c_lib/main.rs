@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::ffi::{c_uint, CString};
 use std::io::{stdout, Write};
 use std::path::PathBuf;
@@ -30,7 +30,7 @@ struct MyFuzzEngine {
 /// arbitrary types can be used for input, as long as they can serialize to Vec<u8>
 impl MyTargetInput {
     /// serialize the test input to byte vector
-    pub fn serialize(self, coverage: HashSet<u64>) -> CorpusInput {
+    pub fn serialize(self, coverage: BTreeSet<u128>) -> CorpusInput {
         // create byte vector to store input data
         let mut bytes: Vec<u8> = Vec::new();
 
@@ -64,7 +64,7 @@ impl MyTargetInput {
     pub fn deserialize(serialized: &CorpusInput) -> Self {
         let mut bytesplit: Vec<Vec<u8>> = vec![];
         let mut cstring: Vec<u8> = vec![];
-        for b in &serialized.data.borrow().to_vec() {
+        for b in &serialized.data.to_vec() {
             if b != &b'\0' {
                 cstring.push(*b);
             } else {
@@ -152,11 +152,11 @@ impl MyFuzzEngine {
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
             self.mutation_engine.mutate();
-            while self.mutation_engine.data.borrow().contains(&b'\0') {
+            while self.mutation_engine.data.contains(&b'\0') {
                 self.mutation_engine.mutate();
             }
         };
-        self.data.str1 = CString::new(self.mutation_engine.data.borrow().to_vec()).unwrap();
+        self.data.str1 = CString::new(self.mutation_engine.data.to_vec()).unwrap();
         self
     }
     fn mutate_string_2(mut self) -> Self {
@@ -166,11 +166,11 @@ impl MyFuzzEngine {
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
             self.mutation_engine.mutate();
-            while self.mutation_engine.data.borrow().contains(&b'\0') {
+            while self.mutation_engine.data.contains(&b'\0') {
                 self.mutation_engine.mutate();
             }
         };
-        self.data.str2 = CString::new(self.mutation_engine.data.borrow().to_vec()).unwrap();
+        self.data.str2 = CString::new(self.mutation_engine.data.to_vec()).unwrap();
         self
     }
     fn mutate_string_3(mut self) -> Self {
@@ -179,11 +179,11 @@ impl MyFuzzEngine {
         .data
         .clone();
         if self.mutation_engine.hashfunc() % 2 == 0 {
-            while self.mutation_engine.data.borrow().contains(&b'\0') {
+            while self.mutation_engine.data.contains(&b'\0') {
                 self.mutation_engine.mutate();
             }
         };
-        self.data.str3 = CString::new(self.mutation_engine.data.borrow().to_vec()).unwrap();
+        self.data.str3 = CString::new(self.mutation_engine.data.to_vec()).unwrap();
         self
     }
 
@@ -213,7 +213,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = Config::defaults();
     cfg.target_path = Vec::from([PathBuf::from("./examples/lib_custom_fuzzer/example.c")]);
     cfg.iterations = 10_000;
-    cfg.objects = vec![PathBuf::from("./a.out")];
     cfg.mutate_args = true;
     cfg.load_env();
 
@@ -225,7 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut crash_corpus = Corpus::new();
 
     // compile target with instrumentation
-    let mut exec = Exec::initialize(cfg)?;
+    let mut exec = Exec::new(cfg)?;
 
     let seed = MyTargetInput {
         num1: 0,
@@ -237,7 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("seeding: {:?}", &seed);
-    cov_corpus.add_and_distill_corpus(seed.serialize(HashSet::new()));
+    cov_corpus.add_and_distill_corpus(seed.serialize(BTreeSet::new()));
 
     let mut out = stdout().lock();
 
@@ -269,12 +268,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // run the program with mutated inputs
         //let (entry, output) = exec.trial(&mut mutation_trial);
-        let output: ExecResult<std::process::Output> =
-            exec.trial(&mut mutation_trial, my_engine.mutation_engine.hashfunc());
+        let output: ExecResult<std::process::Output> = exec.trial(
+            &mut mutation_trial,
+            my_engine.mutation_engine.hashfunc(),
+            vec![],
+        );
 
         let output = match output {
             ExecResult::Ok(o) => o,
             ExecResult::Err(o) => o,
+            ExecResult::NonTerminatingErr(..) => panic!(),
+            ExecResult::CoverageError() => panic!(),
         };
 
         // add inputs yielding new coverage to the corpus
@@ -297,9 +301,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             data: &my_engine.data.serialize(mutation_trial.coverage).data,
             };
             */
-            let corpus_entry = my_engine.data.clone().serialize(mutation_trial.coverage);
+            let corpus_entry = &my_engine.data.clone().serialize(mutation_trial.coverage);
             out.write_all(&[b'\r'])?;
-            crash_corpus.add_and_distill_corpus(corpus_entry);
+            crash_corpus.add_and_distill_corpus(corpus_entry.clone());
             eprintln!("\ncrashed! {}", crash_corpus);
         }
 

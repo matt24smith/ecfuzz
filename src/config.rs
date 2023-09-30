@@ -3,8 +3,8 @@ use std::fs::canonicalize;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use crate::mutator::main as mutate_stdin;
-use crate::mutator::Mutation;
+use crate::grammar_tree::GrammarNode;
+use crate::mutator::{single_shot, Mutation};
 
 const HELPTXT: &str = r#"
 {}
@@ -29,7 +29,14 @@ Options:
 
   -t, --target <path>           Clang input file
 
+  -a, --arg <argument>          Runtime argument passed to the target binary
+
+  -A, --arg-grammar <path>      Generate runtime arguments from a grammar file.
+                                May be repeated
+
   -I, --include <dir>           Include directory in compilation paths list
+
+  -l, --link <arg>              Linker arg. Alternatively set LDFLAGS in the environment
 
   --output-dir <dir>            Output corpus directory. Defaults to '{}'
 
@@ -47,13 +54,16 @@ Options:
   -C, --corpus-dir <dir>        Initialize corpus from a directory of files, one
                                 entry per file. May be repeated for multiple directories
 
+  -g, --grammar <path>          Generate input mutations from a grammar tree file located
+                                at <path>. May not be used with --corpus or --corpus-dir
+
   -p, --plaintext               Output status messages in plaintext
 
-Pass additional args to the compiler by setting $CFLAGS
+  --print-grammar-file <path>   Print a string representation of the grammar syntax tree
+                                loaded from a file, and exit
 
-Environment variables with the 'ECFUZZ_' prefix, capital letters, and
-underscores will override these settings:
-    export ECFUZZ_CORPUS_DIRS="./output/mutations/mutation/ ./output/crashes/mutation/"
+Pass additional args to the compiler by setting $CFLAGS and $LDFLAGS
+
 "#;
 
 #[derive(Clone)]
@@ -62,6 +72,7 @@ pub struct Config {
     pub corpus_dirs: Vec<PathBuf>,
     pub corpus_files: Vec<PathBuf>,
     pub dict_path: Option<PathBuf>,
+    pub grammar: Option<PathBuf>,
     pub include: Vec<PathBuf>,
     pub iterations: usize,
     pub llvm_cov_path: PathBuf,
@@ -74,6 +85,9 @@ pub struct Config {
     pub plaintext: bool,
     pub seed: Vec<u8>,
     pub target_path: Vec<PathBuf>,
+    pub link_args: Vec<String>,
+    pub run_args: Vec<String>,
+    pub run_arg_grammar: Option<PathBuf>,
 }
 
 /// target executor configurations: clang executable path, set CFLAGS variable,
@@ -84,10 +98,9 @@ impl Config {
         let defaults = Config::defaults();
         mutator.data = "ECFuzz: Evolutionary Coverage-guided Fuzzer"
             .as_bytes()
-            .to_vec()
-            .into();
+            .to_vec();
         mutator.mutate();
-        let header: String = String::from_utf8_lossy(&mutator.data.borrow()).to_string();
+        let header: String = String::from_utf8_lossy(&mutator.data).to_string();
         let mut help = HELPTXT.to_owned();
         for arg in [
             &header,
@@ -108,16 +121,20 @@ impl Config {
             corpus_dirs: Vec::new(),
             corpus_files: Vec::new(),
             dict_path: None,
+            grammar: None,
             include: Vec::new(),
             iterations: 10000,
+            link_args: Vec::new(),
             multiplier: Some(0.01),
             mutate_args: false,
             mutate_file: false,
             objects: Vec::new(),
-            output_dir: canonicalize(PathBuf::from("output")).unwrap(),
+            output_dir: PathBuf::from("output"),
+            plaintext: false,
+            run_arg_grammar: None,
+            run_args: Vec::new(),
             seed: Vec::new(),
             target_path: Vec::new(),
-            plaintext: false,
 
             // default paths for Linux
             #[cfg(target_os = "linux")]
@@ -158,38 +175,14 @@ impl Config {
             println!("{}={}", k, v);
             match k.as_ref() {
                 "ECFUZZ_CC_PATH" => self.cc_path = canonicalize(PathBuf::from(v)).unwrap(),
-                "ECFUZZ_CORPUS_DIRS" => {
-                    self.corpus_dirs = v
-                        .split_whitespace()
-                        .map(PathBuf::from)
-                        .map(|p| canonicalize(p).unwrap())
-                        .collect()
-                }
-                "ECFUZZ_CORPUS_FILES" => {
-                    self.corpus_files = v.split_whitespace().map(PathBuf::from).collect()
-                }
-                "ECFUZZ_DICT_PATH" => self.dict_path = Some(PathBuf::from(v)),
-                "ECFUZZ_ITERATIONS" => {
-                    self.iterations = v.parse().expect("parsing $ECFUZZ_ITERATIONS as usize")
-                }
                 "ECFUZZ_LLVM_COV_PATH" => {
                     self.llvm_cov_path = canonicalize(PathBuf::from(v)).unwrap()
                 }
                 "ECFUZZ_LLVM_PROFDATA_PATH" => {
                     self.llvm_profdata_path = canonicalize(PathBuf::from(v)).unwrap()
                 }
-                "ECFUZZ_MULTIPLIER" => {
-                    self.multiplier = Some(v.parse().expect("parsing $ECFUZZ_MULTIPLIER as f64"))
-                }
-                "ECFUZZ_MUTATE_ARGS" => self.mutate_args = true,
-                "ECFUZZ_MUTATE_FILE" => self.mutate_file = true,
-                "ECFUZZ_OBJECTS" => {
-                    self.objects = v.split_whitespace().map(PathBuf::from).collect()
-                }
-                "ECFUZZ_OUTPUT_DIR" => self.output_dir = PathBuf::from(v),
-                "ECFUZZ_SEED" => self.seed = v.into_bytes(),
                 _ => {
-                    panic!("unknown env option {}", k)
+                    eprintln!("unknown env option {}", k)
                 }
             }
         }
@@ -238,10 +231,44 @@ impl Config {
             }
         }
 
-        // mutator mode
+        // single-shot mutator mode
         if std::env::args().any(|x| x == *"--mutate-stdin" || x == *"-") {
-            mutate_stdin()?;
+            single_shot()?;
             std::process::exit(0);
+        }
+
+        // print a grammar tree to stdout and then exit
+        if std::env::args().any(|x| x == *"--print-grammar-file") {
+            let mut stop = false;
+            for arg in &args {
+                if arg == "--print-grammar-file" {
+                    stop = true;
+                } else if arg.get(0..1).unwrap() == "-" {
+                    stop = false;
+                } else if stop {
+                    //assert!(cfg.dict_path.is_none());
+                    //cfg.dict_path = Some(canonicalize(PathBuf::from(arg)).unwrap());
+                    println!(
+                        "{}",
+                        GrammarNode::from_file(&PathBuf::from(arg)).display(None)
+                    );
+                }
+            }
+            std::process::exit(0)
+        }
+
+        let contains_corpus_files: bool =
+            args.contains(&"-c".to_string()) || args.contains(&"--corpus".to_string());
+        let contains_corpus_dirs: bool =
+            args.contains(&"-C".to_string()) || args.contains(&"--corpus-dir".to_string());
+        let contains_corpus: bool = contains_corpus_files || contains_corpus_dirs;
+        let contains_grammar: bool =
+            args.contains(&"-g".to_string()) || args.contains(&"--grammar".to_string());
+        if contains_corpus && contains_grammar {
+            eprintln!(
+                "Error: --grammar may not be used in conjunction with --corpus or --corpus-dir"
+            );
+            std::process::exit(1);
         }
 
         if args.contains(&"-f".to_string()) || args.contains(&"--mutate-file".to_string()) {
@@ -257,8 +284,9 @@ impl Config {
                 if arg == "-d" || arg == "--dictionary-path" {
                     stop = true;
                 } else if stop {
+                    assert!(cfg.dict_path.is_none());
                     cfg.dict_path = Some(canonicalize(PathBuf::from(arg)).unwrap());
-                    break;
+                    stop = false;
                 }
             }
         }
@@ -280,9 +308,66 @@ impl Config {
             for arg in &args {
                 if arg == "-t" || arg == "--target" {
                     stop = true
+                } else if arg.get(0..1).unwrap() == "-" {
+                    stop = false;
                 } else if stop {
                     cfg.target_path
-                        .push(canonicalize(PathBuf::from(arg)).unwrap());
+                        .push(canonicalize(PathBuf::from(arg)).unwrap_or_else(|e| {
+                            panic!("target is not a valid filepath: '{}' {}", arg, e);
+                        }));
+                }
+            }
+        }
+        if args.contains(&"-l".to_string()) || args.contains(&"--link".to_string()) {
+            let mut stop = false;
+            for arg in &mut args {
+                if arg == "-l" || arg == "--link" {
+                    stop = true
+                } else if stop {
+                    arg.insert_str(0, "-l");
+                    cfg.link_args.push(arg.to_string());
+                    stop = false;
+                }
+            }
+        }
+        if args.contains(&"-a".to_string()) || args.contains(&"--arg".to_string()) {
+            let mut stop = false;
+            for arg in &args {
+                if arg == "-a" || arg == "--arg" {
+                    stop = true
+                } else if stop {
+                    cfg.run_args.push(arg.to_string());
+                    stop = false;
+                }
+            }
+        }
+        if args.contains(&"-A".to_string()) || args.contains(&"--arg-grammar".to_string()) {
+            let mut stop = false;
+            for arg in &args {
+                if arg == "-A" || arg == "--arg-grammar" {
+                    stop = true
+                } else if stop {
+                    assert!(cfg.run_arg_grammar.is_none());
+                    let p = PathBuf::from(arg.to_string());
+                    cfg.run_arg_grammar = Some(
+                        canonicalize(p)
+                            .expect("canonicalizing filepath argument to -A/--arg-grammar"),
+                    );
+                    stop = false;
+                }
+            }
+        }
+        if args.contains(&"-g".to_string()) || args.contains(&"--grammar".to_string()) {
+            let mut stop = false;
+            for arg in &args {
+                if arg == "-g" || arg == "--grammar" {
+                    stop = true
+                } else if stop {
+                    assert!(cfg.grammar.is_none());
+                    let p = PathBuf::from(arg.to_string());
+                    cfg.grammar = Some(
+                        canonicalize(p).expect("canonicalizing filepath argument to -g/--grammar"),
+                    );
                     stop = false;
                 }
             }
@@ -354,10 +439,11 @@ impl Config {
             for arg in &args {
                 if arg == "-c" || arg == "--corpus" {
                     stop = true
+                } else if arg.get(0..1).unwrap() == "-" {
+                    stop = false
                 } else if stop {
                     cfg.corpus_files
                         .push(canonicalize(PathBuf::from(arg)).unwrap());
-                    stop = false
                 }
             }
         }
@@ -369,10 +455,11 @@ impl Config {
             for arg in &args {
                 if arg == "-C" || arg == "--corpus-dir" {
                     stop = true
+                } else if arg.get(0..1).unwrap() == "-" {
+                    stop = false
                 } else if stop {
                     cfg.corpus_dirs
                         .push(canonicalize(PathBuf::from(arg)).unwrap());
-                    stop = false
                 }
             }
         }
@@ -401,17 +488,40 @@ impl Config {
                 if arg == "--output-dir" {
                     stop = true;
                 } else if stop {
-                    cfg.output_dir = canonicalize(PathBuf::from(arg)).unwrap();
-                    std::fs::create_dir_all(&cfg.output_dir)?;
+                    let d = PathBuf::from(arg);
+                    if !d.exists() {
+                        println!("creating new output directory {}", d.display());
+                        std::fs::create_dir_all(&d).expect("creating output dir");
+                    }
+                    cfg.output_dir =
+                        canonicalize(d).expect("getting canonicalized path of output directory");
                     stop = false;
                 }
             }
         }
 
-        if cfg.corpus_dirs.is_empty() && cfg.corpus_files.is_empty() {
-            cfg.corpus_files
-                .push(canonicalize(PathBuf::from("./input/corpus")).unwrap());
+        if cfg.target_path.is_empty() {
+            eprintln!("Missing --target argument. See --help for more info");
+            std::process::exit(0);
         }
+        if !&args.contains(&"--output-dir".to_string()) {
+            eprintln!("Missing --output-dir argument. See --help for more info");
+            std::process::exit(0);
+        }
+        if cfg.corpus_dirs.is_empty() && cfg.corpus_files.is_empty() && cfg.grammar.is_none() {
+            eprintln!("Atleast one of the following options must be used: --corpus --corpus-dir --grammar.");
+            eprintln!("See --help for more info");
+            std::process::exit(0);
+        }
+
+        /*
+        if cfg.corpus_dirs.is_empty() && cfg.corpus_files.is_empty() {
+        cfg.corpus_files.push(
+        canonicalize(PathBuf::from("./input/corpus"))
+        .unwrap_or_else(|e| panic!("could not open file {}! {}.\nuse --corpus or --corpus-dir to change the default corpus path", "./input.corpus", e)),
+        );
+        }
+        */
         Ok(cfg)
     }
 }

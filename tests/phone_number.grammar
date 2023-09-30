@@ -1,0 +1,29 @@
+<phone-number>=<countrycode>(<area>) <exchange>-<line><ext>
+# values may be left empty 
+<countrycode>=
+<countrycode>=+1 
+<area>=<digit><digit><digit>
+<exchange>=<digit><digit><digit>
+<line>=<digit><digit><digit><digit>
+# values may be repeated to increase the frequency of occurrence
+<ext>=
+<ext>=
+<ext>=
+<ext>=
+<ext>=
+<ext>=
+<ext>=
+<ext>=
+<ext>=
+<ext>=
+<ext>=, ext. <digit><digit>
+<digit>=0
+<digit>=1
+<digit>=2
+<digit>=3
+<digit>=4
+<digit>=5
+<digit>=6
+<digit>=7
+<digit>=8
+<digit>=9

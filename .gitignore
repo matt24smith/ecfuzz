@@ -2,6 +2,7 @@
 **.dSYM
 **.gcda
 **.gcno
+**.log
 **.mutation
 **.mutation
 **.out
@@ -29,11 +30,12 @@ init.profdata
 init.profraw
 input/*
 input/**
+metasploit-db
 output
 output.txt
 perf.data
 profdata
 profraw
 sample*.json
-target
 seed.sh
+target
