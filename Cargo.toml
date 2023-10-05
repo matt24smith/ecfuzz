@@ -20,3 +20,8 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 [dependencies]
 rayon = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+async-std = "1.12"
+futures = {version = "*", features = ["executor",] }
+
+[profile.release]
+lto = true

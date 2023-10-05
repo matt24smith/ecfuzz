@@ -38,12 +38,15 @@ use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::{ffi::OsStringExt, process::ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::thread::{available_parallelism, current, Builder, JoinHandle};
 use std::time::Instant;
 
+use futures::future::FutureExt;
+use futures::pin_mut;
+use futures::select;
 use rayon::ThreadPoolBuilder;
 
 use crate::config::Config;
@@ -66,7 +69,8 @@ pub const SANITIZERS: &[&str] = &[
 ];
 #[cfg(not(debug_assertions))]
 #[cfg(target_os = "macos")]
-pub const SANITIZERS: &[&str] = &["address", "thread", "undefined"];
+//pub const SANITIZERS: &[&str] = &["address", "thread", "undefined"];
+pub const SANITIZERS: &[&str] = &["cfi", "undefined"];
 #[cfg(not(debug_assertions))]
 #[cfg(target_os = "windows")]
 pub const SANITIZERS: &[&str] = &["address", "undefined"];
@@ -118,7 +122,7 @@ fn compiled_executable_path(cfg: &Config, sanitizer: &str) -> PathBuf {
 }
 
 impl Exec {
-    /// compile and instrument the target.
+    /// compile and instrument the target//.
     pub fn new(cfg: Config) -> Result<Exec, Box<dyn std::error::Error>> {
         // ensure cc is clang >= v14.0.0
         let check_cc_ver = Command::new(&cfg.cc_path)
@@ -197,10 +201,9 @@ impl Exec {
                         "-o",
                         &compiled_path.display().to_string(),
                         &sanitizer_arg,
-                        "-flto=thin",
-                        "-fvisibility=hidden",
                         "-g",
-                        "-mshstk",
+                        "-fsanitize-recover=all",
+                        //"-D_FORTIFY_SOURCE=1",
                         "-fprofile-instr-generate",
                         "-fcoverage-mapping",
                         "-fno-optimize-sibling-calls",
@@ -213,6 +216,11 @@ impl Exec {
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
+
+                    if setup_args.contains(&"-fsanitize=cfi".to_string()) {
+                        setup_args.push("-flto=full".to_string());
+                        setup_args.push("-fvisibility=hidden".to_string());
+                    }
 
                     if cfg.plaintext {
                         setup_args.push("-fno-color-diagnostics".to_string());
@@ -558,8 +566,9 @@ impl Exec {
 
 
                         let wait_timer = Instant::now();
-                        while wait_timer.elapsed().as_millis() <= 10000 {
-                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        while wait_timer.elapsed().as_millis() <= 2000 {
+                            //std::thread::sleep(std::time::Duration::from_millis(10));
+                            //async_std::task::sleep(std::time::Duration::from_millis(1000)).await;
                             let retry_get_result = finished_map
                                 .remove(&(i - FUZZING_QUEUE_SIZE * 2));
                             if let Some((corpus_entry, result))  = retry_get_result {
@@ -718,7 +727,7 @@ impl Exec {
 
                 // warn if exited before logging coverage
                 ExecResult::Ok(_o) | ExecResult::Err(_o) if corpus_entry.coverage.is_empty() => {
-                    #[cfg(debug_assertions)]
+                    //#[cfg(debug_assertions)]
                     eprintln!("\nError: could not read coverage from crash!",);
                     /*
                     panic!(
@@ -1246,51 +1255,65 @@ fn exec_target(
     let mut recv_output = BufReader::new(recv_output);
     let mut recv_outerr = BufReader::new(recv_outerr);
 
-    let write_result = send_input.write_all(input);
-    let send_input_result = send_input.flush();
-    std::mem::drop(send_input);
-
     let mut out_buf: Vec<u8> = Vec::new();
     let mut err_buf: Vec<u8> = Vec::new();
 
-    let kill_timer = std::time::Instant::now();
+    let runner_killer = async {
+        async_std::task::sleep(std::time::Duration::from_millis(1000)).await;
 
-    let mut still_running: Result<Option<ExitStatus>, std::io::Error> = profile_target.try_wait();
-    while matches!(still_running, Ok(None)) {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        still_running = profile_target.try_wait();
-        if kill_timer.elapsed() > std::time::Duration::from_millis(500) {
-            eprintln!("\nKILLING PID={}...", profile_target.id());
-            std::mem::drop(recv_output);
-            std::mem::drop(recv_outerr);
-            profile_target
-                .kill()
-                .expect("killing nonterminating process");
-            profile_target
-                .wait()
-                .expect("waiting for killed projess to return");
-            return ExecResult::NonTerminatingErr(profile_target.id());
+        eprintln!(
+            "ERR sanitizer {}\tFAILED INPUT {}",
+            SANITIZERS[sanitizer_idx],
+            String::from_utf8_lossy(input)
+        );
+    };
+
+    let mut still_running = None;
+    let runner = async {
+        send_input
+            .write_all(input)
+            .expect("sending input to target stdin");
+        send_input.flush().expect("flushing input to target stdin");
+        std::mem::drop(send_input);
+        still_running = Some(profile_target.wait().unwrap());
+
+        // caution: read call blocks if the process becomes unresponsive
+        recv_output.read_to_end(&mut out_buf).unwrap();
+        recv_outerr.read_to_end(&mut err_buf).unwrap();
+        //println!("OK sanitizer {:?}", SANITIZERS[sanitizer_idx]);
+
+        //std::mem::drop(recv_output);
+        //std::mem::drop(recv_outerr);
+    };
+
+    let race = async {
+        let r = runner.fuse();
+        let k = runner_killer.fuse();
+        pin_mut!(r, k);
+        //let mut r = Box::pin(r.fuse());
+        //let mut k = Box::pin(k.fuse());
+        select! {
+            () = r => Ok(()),
+            () = k => Err(()),
         }
+    };
+    let race_result: Result<(), ()> = futures::executor::block_on(race);
+
+    if race_result.is_err() {
+        eprintln!("\nKILLING PID={}...", profile_target.id(),);
+        std::mem::drop(recv_output);
+        std::mem::drop(recv_outerr);
+        profile_target
+            .kill()
+            .expect("killing nonterminating process");
+        profile_target
+            .wait()
+            .expect("waiting for killed process to return");
+        return ExecResult::NonTerminatingErr(profile_target.id());
     }
 
-    // caution: read call blocks if the process becomes unresponsive
-    recv_output.read_to_end(&mut out_buf).unwrap();
-    recv_outerr.read_to_end(&mut err_buf).unwrap();
-
-    //profile_target.wait().unwrap();
-    std::mem::drop(recv_output);
-    std::mem::drop(recv_outerr);
-
-    //let output = profile_target.wait_with_output().unwrap();
-    //assert!(still_running.is_ok());
-    //let output = profile_target.wait_with_output().unwrap();
-    let exited: Option<ExitStatus> = still_running.expect("getting child exit status");
-    let done = exited.expect("child did not exit properly");
-    //eprintln!("EXITED: {:?}", exited);
-    //assert!(exited.is_some());
-
     let output = std::process::Output {
-        status: done,
+        status: still_running.unwrap(),
         stdout: out_buf,
         stderr: err_buf,
     };
@@ -1299,7 +1322,7 @@ fn exec_target(
         remove_file(fname).expect("removing input mutation file");
     }
 
-    if write_result.is_ok() && send_input_result.is_ok() && output.status.code() == Some(0) {
+    if output.status.code() == Some(0) {
         ExecResult::Ok(output)
     } else {
         ExecResult::Err(output)
