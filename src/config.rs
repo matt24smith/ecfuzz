@@ -19,13 +19,14 @@ Options:
 
   -m, --multiplier <N>          Mutations per byte. Default 0.01
 
-   -, --mutate-stdin            The main loop won't be run. Instead, read data from
+  -1, --single-shot             The main loop won't be run. Instead, read data from
                                 stdin, and return mutated bytes to stdout. If
                                 used, the options below will be ignored.
 
   -f, --mutate-file             If this flag is set, mutations will be written
-                                to './ecfuzz-worker-N.mutation' instead of the
-                                target stdin
+                                to './ecfuzz-worker-N.mutation' 
+
+  --no-mutate-stdin             Do not send anything to target via stdin
 
   -t, --target <path>           Clang input file
 
@@ -80,6 +81,7 @@ pub struct Config {
     pub multiplier: Option<f64>,
     pub mutate_args: bool,
     pub mutate_file: bool,
+    pub mutate_stdin: bool,
     pub objects: Vec<PathBuf>,
     pub output_dir: PathBuf,
     pub plaintext: bool,
@@ -128,6 +130,7 @@ impl Config {
             multiplier: Some(0.01),
             mutate_args: false,
             mutate_file: false,
+            mutate_stdin: true,
             objects: Vec::new(),
             output_dir: PathBuf::from("output"),
             plaintext: false,
@@ -232,7 +235,7 @@ impl Config {
         }
 
         // single-shot mutator mode
-        if std::env::args().any(|x| x == *"--mutate-stdin" || x == *"-") {
+        if std::env::args().any(|x| x == *"--single-shot" || x == *"-1") {
             single_shot()?;
             std::process::exit(0);
         }
@@ -273,6 +276,9 @@ impl Config {
 
         if args.contains(&"-f".to_string()) || args.contains(&"--mutate-file".to_string()) {
             cfg.mutate_file = true;
+        }
+        if args.contains(&"--no-mutate-stdin".to_string()) {
+            cfg.mutate_stdin = false;
         }
         if args.contains(&"-p".to_string()) || args.contains(&"--plaintext".to_string()) {
             cfg.plaintext = true;
