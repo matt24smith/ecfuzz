@@ -14,6 +14,7 @@ use crate::execute::SANITIZERS;
 #[derive(Clone)]
 pub struct CorpusInput {
     pub data: Vec<u8>,
+    pub args: Vec<u8>,
     pub coverage: BTreeSet<u128>,
     pub lifetime: u64,
 }
@@ -28,7 +29,8 @@ impl CorpusInput {
     /// Initialize a new CorpusInput with empty values
     pub fn empty() -> Self {
         CorpusInput {
-            data: b"".to_vec(),
+            data: Vec::new(),
+            args: Vec::new(),
             coverage: BTreeSet::new(),
             lifetime: 0,
         }
@@ -36,13 +38,13 @@ impl CorpusInput {
 
     /// Compute hashes of stdout, stderr by executing input with each sanitizer.
     /// Hashes will only be computed for outputs with matching coverage sets
-    fn exec_output_hashes(&self, exec: &mut Exec, grammar_args: &[u8]) -> Vec<u64> {
+    fn exec_output_hashes(&self, exec: &mut Exec) -> Vec<u64> {
         //eprintln!("CHECK HASH FOR {}", String::from_utf8_lossy(&self.data),);
         let mut hashes: Vec<u64> = Vec::new();
 
         for san_idx in 0..SANITIZERS.len() {
             let mut test_input = self.clone();
-            let _result = exec.trial(&mut test_input, san_idx, grammar_args.to_vec());
+            let _result = exec.trial(&mut test_input, san_idx);
             let mut concat = Vec::new();
             for cov in test_input.coverage.iter() {
                 concat.append(&mut cov.to_le_bytes().to_vec());
@@ -88,12 +90,12 @@ impl CorpusInput {
     /// and stderr remain unchanged.
     /// Very slow for large inputs.
     /// Assumes coverage data is already up to date.
-    pub fn minimize_input(&mut self, exec: &mut Exec, grammar_args: &[u8]) {
+    pub fn minimize_input(&mut self, exec: &mut Exec) {
         let start_bytesize = self.data.len();
         let chunk_size = 2_usize.pow(max(1, (start_bytesize as i64 / 64) - 2).ilog2());
 
         // compute hash of output stdout, stderr, and exit code for each sanitizer
-        let unmodified_hashes: Vec<u64> = self.exec_output_hashes(exec, grammar_args);
+        let unmodified_hashes: Vec<u64> = self.exec_output_hashes(exec);
 
         for byte_idx in (1..self.data.len() - chunk_size + 1)
             .step_by(chunk_size)
@@ -105,7 +107,7 @@ impl CorpusInput {
                 minified_input.data.remove(byte_idx);
             }
 
-            let test_hashes = minified_input.exec_output_hashes(exec, grammar_args);
+            let test_hashes = minified_input.exec_output_hashes(exec);
             let hashes_match = unmodified_hashes
                 .iter()
                 .zip(test_hashes.iter())
@@ -241,6 +243,7 @@ impl Corpus {
             .filter(|x| !x.is_empty())
             .map(|x| CorpusInput {
                 data: x,
+                args: Vec::new(),
                 coverage: BTreeSet::new(),
                 lifetime: 0,
             })
@@ -259,6 +262,7 @@ impl Corpus {
         let f: Vec<u8> = read(corpus_path).expect("couldn't find corpus path!");
         let c = CorpusInput {
             data: f,
+            args: Vec::new(),
             coverage: BTreeSet::new(),
             lifetime: 0,
         };
@@ -281,6 +285,7 @@ impl Corpus {
             .map(|e| read(e).expect("reading corpus dir"))
             .map(|x| CorpusInput {
                 data: x,
+                args: Vec::new(),
                 coverage: BTreeSet::new(),
                 lifetime: 0,
             })
@@ -351,32 +356,36 @@ impl Corpus {
 
 impl std::fmt::Debug for CorpusInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut maxlen = 32;
-        if self.data.len() < maxlen {
-            maxlen = self.data.len();
-        }
         f.debug_struct("\n    CorpusInput: ")
             .field("coverage", &self.coverage.len())
             .field("lifetime", &self.lifetime)
             .field(
                 "preview",
-                &String::from_utf8_lossy(&self.data[0..maxlen]).replace('\n', ""),
+                &String::from_utf8_lossy(&self.data[0..min(self.data.len(), 32)])
+                    .replace('\n', "\\n"),
+            )
+            .field(
+                "args",
+                &String::from_utf8_lossy(&self.args[0..min(self.args.len(), 32)])
+                    .replace('\n', "\\n"),
             )
             .finish()
     }
 }
 impl std::fmt::Display for CorpusInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut maxlen = 32;
-        if self.data.len() < maxlen {
-            maxlen = self.data.len();
-        }
         f.debug_struct("\n    CorpusInput: ")
             .field("coverage", &self.coverage.len())
             .field("lifetime", &self.lifetime)
             .field(
                 "preview",
-                &String::from_utf8_lossy(&self.data[0..maxlen]).replace('\n', ""),
+                &String::from_utf8_lossy(&self.data[0..min(self.data.len(), 32)])
+                    .replace('\n', "\\n"),
+            )
+            .field(
+                "args",
+                &String::from_utf8_lossy(&self.args[0..min(self.args.len(), 32)])
+                    .replace('\n', "\\n"),
             )
             .finish()
     }
@@ -442,12 +451,12 @@ mod tests {
         // check coverage of initial inputs
         //corpus.initialize(&mut exec, &vec![]);
         for input in &mut corpus.inputs {
-            let _result = exec.trial(input, 0, [].to_vec());
+            let _result = exec.trial(input, 0);
             if input.coverage.is_subset(&corpus.total_coverage) {
                 continue;
             }
             corpus.total_coverage.extend(&input.coverage);
-            input.minimize_input(&mut exec, &[]);
+            input.minimize_input(&mut exec);
         }
     }
 
@@ -464,6 +473,7 @@ mod tests {
     fn test_minimize_input() {
         let mut test_input = CorpusInput {
             coverage: BTreeSet::new(),
+            args: Vec::new(),
             data: b"ABC0000000".to_vec(),
             lifetime: 0,
         };
@@ -476,12 +486,12 @@ mod tests {
         std::fs::create_dir_all(&cfg.output_dir).unwrap();
         let mut exec = Exec::new(cfg).unwrap();
 
-        let result = exec.trial(&mut test_input, 0, b"".to_vec());
+        let result = exec.trial(&mut test_input, 0);
         if let ExecResult::Ok(_r) = result {
         } else {
             panic!("this input should pass");
         }
-        test_input.minimize_input(&mut exec, b"".as_ref());
+        test_input.minimize_input(&mut exec);
 
         assert_eq!(String::from_utf8_lossy(&test_input.data), "ABC");
     }
