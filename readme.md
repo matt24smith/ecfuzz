@@ -32,7 +32,7 @@ See examples below for a demonstration of how source code coverage is measured f
  - CLI (see `ecfuzz --help`)
  - Rust lib (docs: <https://docs.rs/ecfuzz/latest/ecfuzz/>)
  - [LibFuzzer fuzz targets](<https://www.llvm.org/docs/LibFuzzer.html#fuzz-target>)
-    - `libfuzz-driver.cpp` can be included as a target from the project repo as a drop-in replacement for `StandaloneFuzzTargetMain.c`
+    - `libfuzzer-driver.cpp` can be included as a target from the project repo as a drop-in replacement for `StandaloneFuzzTargetMain.c`
 
 ### Corpus Distillation
 A genetic algorithm is used to maximize code coverage while minimizing corpus size:
@@ -68,9 +68,9 @@ Keys are split on the first `=` symbol, and keys may be repeated on a new line f
 
 
 ### Grammar Fuzzing
-In addition to mutational fuzzing, a grammar file can be supplied to specify a grammar syntax tree. 
-Each line in the file defines a node, with `key=value` separated by the first `=` symbol.
-Parent nodes must be defined before child nodes.
+In addition to mutational fuzzing, a byte map can be supplied to specify a grammar syntax tree. 
+Each line (seperated by '\n') defines a tree node, with `key=value` separated by the first `=` symbol.
+Parent nodes must be defined before child nodes, and parents may have multiple children.
 Mutations will be generated from a depth-first walk through the resulting tree, with node navigations selected by hash.
 
 Grammar-generated inputs will be sent to stdin from the grammar file given to `--grammar <path>`, and inputs generated from grammar file `--arg-grammar <path>` will be passed as arguments to the target executable.
@@ -194,7 +194,10 @@ coverage:    12/12     exec/s: 1607  corpus size: 2    unique crashes: 2    i: 1
 
 ### LibFuzzer example
 
-TODO: update LibFuzzer example
+ECFuzz is compatible with LibFuzzer test harnesses.
+To run LibFuzzer tests, include [`libfuzzer-driver.cpp`](https://github.com/matt24smith/ecfuzz/blob/master/libfuzzer-driver.cpp) from the project repository as a target, and set the compiler to `clang++`. 
+This source file is drop-in replacement for [`StandaloneFuzzTargetMain.c`](https://github.com/llvm-mirror/compiler-rt/blob/master/lib/fuzzer/standalone/StandaloneFuzzTargetMain.c), sending input to the target stdin.
+Example: [Running LibFuzzer targets under ECFuzz](https://github.com/matt24smith/ecfuzz/blob/master/examples/libfuzzer-example/)
 
 ## Install Clang and LLVM from source
 

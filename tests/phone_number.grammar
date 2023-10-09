@@ -1,22 +1,18 @@
 <phone-number>=<countrycode>(<area>) <exchange>-<line><ext>
-# values may be left empty 
-<countrycode>=
-<countrycode>=+1 
 <area>=<digit><digit><digit>
 <exchange>=<digit><digit><digit>
 <line>=<digit><digit><digit><digit>
-# values may be repeated to increase the frequency of occurrence
-<ext>=
-<ext>=
-<ext>=
-<ext>=
-<ext>=
+# values may be empty 
+<countrycode>=
+<countrycode>=+1 
+# values may be repeated for increased probability
 <ext>=
 <ext>=
 <ext>=
 <ext>=
 <ext>=
 <ext>=, ext. <digit><digit>
+# child nodes must be defined after parent nodes
 <digit>=0
 <digit>=1
 <digit>=2
