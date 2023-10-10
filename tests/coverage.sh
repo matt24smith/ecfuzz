@@ -1,8 +1,24 @@
+#!/bin/bash
 set -e
-[[ `uname` = 'Darwin' ]] && PREFIX="xcrun"
-export RUSTFLAGS='-C instrument-coverage'
 
-cargo test --lib
+#cargo clean
+rm -rf ./target/debug/deps/ecfuzz-*
+rm -rf ./target/release/deps/ecfuzz-*
+[[ `uname` = 'Darwin' ]] && PREFIX="xcrun"
+
+
+if [ $# -eq 0 ]; then
+  ALLOWED="--ignore-filename-regex=registry|fast_local"
+else
+  MODULE_NAME=`echo $1 | cut -d'.' -f1 | cut -d'/' -f2`
+  IGNORED=`find src | grep -v $MODULE_NAME | tail -n+2 | cut -d'.' -f1 | cut -d'/' -f2 | tr '\n' '|'`
+  IGNORED=${IGNORED::-1}
+  ALLOWED="--ignore-filename-regex=registry|fast_local|$IGNORED"
+fi
+
+
+export RUSTFLAGS='-C instrument-coverage'
+cargo test --lib --no-fail-fast $MODULE_NAME 
 TARGET_BIN=`ls --color=none target/debug/deps/ecfuzz-* | head -n1`
 
 $PREFIX llvm-profdata merge \
@@ -15,11 +31,15 @@ rm default_*.profraw
 $PREFIX llvm-cov show \
   --summary-only \
   --instr-profile="ecfuzz.profdata" \
-  --ignore-filename-regex="registry" \
+  $ALLOWED \
   $TARGET_BIN 
 
+  #--ignore-filename-regex="registry" \
+  #--ignore-filename-regex="fast-local" \
 $PREFIX llvm-cov report \
-  --instr-profile ecfuzz.profdata \
   --summary-only \
-  --ignore-filename-regex="registry" \
+  --instr-profile ecfuzz.profdata \
+  $ALLOWED \
   $TARGET_BIN
+
+echo "$1 $MODULE_NAME ALLOWED=$ALLOWED"

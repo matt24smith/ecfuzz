@@ -1294,3 +1294,37 @@ fn exec_target(
         ExecResult::Err(output)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_demo() {
+        //let mut cfg: Config = Config::parse_args().expect("parsing config");
+        let mut cfg: Config = Config::defaults();
+        cfg.load_env();
+        cfg.target_path = [PathBuf::from("./examples/cli/fuzz_target.c")].to_vec();
+        cfg.corpus_files = [PathBuf::from("./examples/cli/input/corpus")].to_vec();
+        cfg.output_dir = PathBuf::from("./output/testdata/");
+        cfg.dict_path = Some(PathBuf::from("examples/cli/input/sample.dict"));
+        cfg.iterations = 512;
+        cfg.seed = b"117".to_vec();
+
+        let mut engine =
+            Mutation::with_seed(cfg.dict_path.clone(), cfg.seed.clone(), cfg.multiplier);
+        let mut executor = Exec::new(cfg).expect("preparing execution context");
+
+        let mut corpus = Corpus::new();
+        for filepath in &executor.cfg.corpus_files {
+            corpus.append(&mut Corpus::load(filepath).expect("reading corpus file"))
+        }
+        for filepath in &executor.cfg.corpus_dirs {
+            corpus.append(&mut Corpus::load(filepath).expect("reading corpus dir"))
+        }
+
+        executor
+            ._main_loop(&mut corpus, &mut engine)
+            .expect("executing main loop");
+    }
+}

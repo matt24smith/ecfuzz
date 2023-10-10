@@ -458,6 +458,14 @@ mod tests {
             corpus.total_coverage.extend(&input.coverage);
             input.minimize_input(&mut exec);
         }
+        corpus.save(&PathBuf::from("./output/cli/")).unwrap();
+        let mut corpus2 = Corpus::new();
+        for i in &corpus.inputs {
+            corpus2.add(i.clone());
+            corpus2.add_and_distill_corpus(i.clone());
+        }
+        corpus.append(&mut corpus2);
+        println!("{} {:?}", corpus, corpus);
     }
 
     #[test]
@@ -493,6 +501,9 @@ mod tests {
         }
         test_input.minimize_input(&mut exec);
 
+        println!("{} {:?}", test_input, test_input);
+
         assert_eq!(String::from_utf8_lossy(&test_input.data), "ABC");
+        assert_ne!(test_input.data, CorpusInput::empty().data);
     }
 }

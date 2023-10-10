@@ -125,7 +125,7 @@ pub fn load_dictionary(dict_path: PathBuf) -> BTreeMap<Vec<u8>, Vec<Vec<u8>>> {
     let mut dict: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
 
     let lines = read(&dict_path)
-        .unwrap_or_else(|_| panic!("could not load dictionary from file! {:?}", dict_path))
+        .unwrap_or_else(|e| panic!("could not load dictionary from file: {} {:?}", e, dict_path))
         .split(|x| x == &b'\n')
         .filter(|x| !x.is_empty() && x[0] != b'#')
         .map(|x| x.to_vec())
