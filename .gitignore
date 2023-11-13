@@ -26,6 +26,7 @@ clang-compile.sh
 corpus/corpus
 corpus/corpus.coverage
 ignore
+include
 init.profdata
 init.profraw
 input/*
