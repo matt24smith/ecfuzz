@@ -3,7 +3,6 @@ use std::fs::canonicalize;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use crate::grammar_tree::GrammarNode;
 use crate::mutator::{single_shot, Mutation};
 
 const HELPTXT: &str = r#"
@@ -242,6 +241,9 @@ impl Config {
 
         // print a grammar tree to stdout and then exit
         if std::env::args().any(|x| x == *"--print-grammar-file") {
+            // remove this in favor of SVG export ??
+            eprintln!("unhandled behaviour");
+            assert!(false);
             let mut stop = false;
             for arg in &args {
                 if arg == "--print-grammar-file" {
@@ -250,11 +252,8 @@ impl Config {
                     stop = false;
                 } else if stop {
                     //assert!(cfg.dict_path.is_none());
-                    //cfg.dict_path = Some(canonicalize(PathBuf::from(arg)).unwrap());
-                    println!(
-                        "{}",
-                        GrammarNode::from_file(&PathBuf::from(arg)).display(None)
-                    );
+                    //println!( "{}", GrammarNode::from_file(&PathBuf::from(arg)).display(None));
+                    //TODO print grammar file or export to graphviz or something
                 }
             }
             std::process::exit(0)

@@ -1,9 +1,10 @@
 use ecfuzz::config::Config;
-use ecfuzz::corpus::Corpus;
+use ecfuzz::corpus::{BytesCorpus, CorpusType};
 use ecfuzz::execute::Exec;
+use ecfuzz::grammar_tree::GraphTree;
 use ecfuzz::mutator::Mutation;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     // read configuration from command line arguments,
     // such as fuzz target filepath, compiler path, input files, etc.
     // see 'ecfuzz --help' for more info
@@ -17,30 +18,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cfg.load_env();
 
     // change directory to output_dir
-    std::env::set_current_dir(&cfg.output_dir)?;
+    std::env::set_current_dir(&cfg.output_dir).expect("setting current directory to output_dir");
+
+    // load initial corpus into memory
+    let mut corpus = BytesCorpus::new();
+    for filepath in cfg.corpus_files.iter().chain(cfg.corpus_dirs.iter()) {
+        corpus.append(&mut BytesCorpus::load(filepath).expect("reading corpus"))
+    }
+    let mut cov_corpus = CorpusType::Bytes(corpus);
+    let mut crash_corpus = CorpusType::Bytes(BytesCorpus::new());
 
     // mutation engine
     let mut engine = Mutation::with_seed(cfg.dict_path.clone(), cfg.seed.clone(), cfg.multiplier);
 
-    // execution context: compile instrumented target from source,
-    // and prepare threadpool for fuzzing
-    let mut executor = Exec::new(cfg).expect("preparing execution context");
+    // note: GraphTree may instead be used instead for graph-based
+    // mutations instead of binary mutations
+    let graph_stdin: Option<Box<GraphTree>> = if cfg.run_arg_grammar.is_some() {
+        Some(Box::new(GraphTree::from_file(
+            cfg.run_arg_grammar.as_ref().unwrap(),
+        )))
+    } else {
+        None
+    };
+    let graph_args: Option<Box<GraphTree>> = if cfg.grammar.is_some() {
+        Some(Box::new(GraphTree::from_file(
+            cfg.grammar.as_ref().unwrap(),
+        )))
+    } else {
+        None
+    };
 
-    // load corpus into memory
-    // note: GrammarNode may instead be used here for grammar tree generative
-    // fuzzing instead of genetic fuzzing
-    let mut corpus = Corpus::new();
-    for filepath in &executor.cfg.corpus_files {
-        corpus.append(&mut Corpus::load(filepath).expect("reading corpus file"))
-    }
-    for filepath in &executor.cfg.corpus_dirs {
-        corpus.append(&mut Corpus::load(filepath).expect("reading corpus dir"))
-    }
-
-    // run the fuzzer in a loop
-    executor
-        ._main_loop(&mut corpus, &mut engine)
-        .expect("executing main loop");
-
-    Ok(())
+    // compile and instrument target
+    let executor = Exec::new(&cfg);
+    executor.exec_loop(
+        &mut cov_corpus,
+        &mut crash_corpus,
+        &mut engine,
+        graph_args,
+        graph_stdin,
+    );
 }

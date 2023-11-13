@@ -25,7 +25,6 @@ const CFLAGS_DEFAULTS: &str = "-O0 -g -fcolor-diagnostics -fuse-ld=lld";
 
 use std::cmp::max;
 use std::collections::{BTreeSet, HashMap};
-use std::error::Error;
 use std::ffi::OsString;
 use std::fs::remove_file;
 use std::io::{stdout, BufRead, BufReader, BufWriter, Read, Write};
@@ -47,11 +46,12 @@ use std::time::Instant;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
+
 use rayon::ThreadPoolBuilder;
 
 use crate::config::Config;
-use crate::corpus::{Corpus, CorpusInput};
-use crate::grammar_tree::GrammarTree;
+use crate::corpus::{BytesInput, CorpusOps, CorpusType, GraphInput, InputType};
+use crate::grammar_tree::GraphTree;
 use crate::mutator::{byte_index, Mutation};
 
 /// number of mutations that will be queued for fuzzing before checking results
@@ -78,14 +78,17 @@ pub const SANITIZERS: &[&str] = &["address", "undefined"];
 #[cfg(debug_assertions)]
 pub const SANITIZERS: &[&str] = &[""];
 
+#[derive(Clone)]
 pub struct Exec {
     pub cfg: Arc<Config>,
+    _private: (),
 }
 
+#[derive(Debug)]
 pub enum ExecResult<Output> {
     Ok(Output),
     Err(Output),
-    NonTerminatingErr(u32),
+    NonTerminatingErr(u32), // u32 val is the PID of the unterminated process
     CoverageError(),
 }
 
@@ -121,9 +124,563 @@ fn compiled_executable_path(cfg: &Config, sanitizer: &str) -> PathBuf {
     cfg.output_dir.as_path().join(exe_name)
 }
 
+/// convert raw profile data to an indexed file format
+fn index_target_report(
+    cfg: &Arc<Config>,
+    raw_profile_filepath: &Path,
+    profile_filepath: &Path,
+) -> Result<(), ()> {
+    let prof_merge_args = &[
+        "merge".to_string(),
+        "-sparse".to_string(),
+        //"--instr".to_string(),
+        raw_profile_filepath.display().to_string(),
+        "--output".to_string(),
+        profile_filepath.display().to_string(),
+    ];
+    let prof_merge_result = Command::new(&cfg.llvm_profdata_path)
+        .args(prof_merge_args)
+        .output()
+        .expect("executing llvm-profdata");
+    if !prof_merge_result.status.success() {
+        eprintln!(
+            "Could not merge profile data. {} Args:\n{} {}\n",
+            String::from_utf8_lossy(&prof_merge_result.stderr),
+            &cfg.llvm_profdata_path.display(),
+            &prof_merge_args.join(" ")
+        );
+        return Err(());
+    }
+    Ok(())
+}
+
+/// count the number of code branches in the coverage file
+pub fn count_branch_total(
+    cfg: &Arc<Config>,
+    sanitizer_idx: usize,
+    base_input: &[u8],
+    base_args: &[u8],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let profraw = cfg.output_dir.join(format!(
+        "{}.profraw",
+        current().name().expect("getting thread name")
+    ));
+    let profdata = cfg.output_dir.join(format!(
+        "{}.profdata",
+        current().name().expect("getting thread name")
+    ));
+
+    let output = exec_target(cfg, 0, &profraw, base_input, base_args.to_owned());
+    if let ExecResult::Err(o) = output {
+        if o.status.code().is_none() {
+            panic!(
+                "could not get status code from target!\nINPUT {}\nARGS {}\nstderr: {:#?}",
+                String::from_utf8_lossy(base_input),
+                String::from_utf8_lossy(base_args),
+                String::from_utf8_lossy(&o.stderr),
+            );
+        }
+    }
+
+    index_target_report(cfg, &profraw, &profdata).unwrap();
+
+    remove_file(profraw).expect("removing raw profile data");
+
+    let prof_report = Command::new(&cfg.llvm_cov_path)
+        .args([
+            "export",
+            "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp|StandaloneFuzzTargetMain.c",
+            "--check-binary-ids",
+            "--num-threads=1",
+            "--skip-expansions",
+            "--skip-functions",
+            "--format=lcov",
+            "--instr-profile",
+            &profdata.display().to_string(),
+            "--object",
+            &compiled_executable_path(cfg, SANITIZERS[sanitizer_idx])
+                .display()
+                .to_string(),
+        ])
+        .stdout(Stdio::piped())
+        .output()
+        .expect("executing llvm-cov");
+
+    if prof_report.stdout.is_empty() {
+        panic!(
+            "empty profdata: {:#?}\n{}",
+            profdata,
+            String::from_utf8_lossy(&prof_report.stderr)
+        );
+    }
+
+    remove_file(profdata).expect("removing coverage profile data");
+
+    let mut branches: BTreeSet<u128> = BTreeSet::new();
+    let mut file_index = 0;
+    let lines = prof_report.stdout.split(|byte| byte == &b'\n');
+    for line in lines {
+        if line.len() >= 2 && &line[0..2] == b"SF" {
+            file_index += 1;
+            continue;
+        }
+        if !(line.len() >= 4 && &line[0..4] == b"BRDA") {
+            continue;
+        }
+        let linenumber_block_expr_count = &line
+            .splitn(2, |l| l == &b':')
+            .last()
+            .unwrap()
+            .split(|l| l == &b',')
+            .collect::<Vec<_>>();
+
+        #[cfg(debug_assertions)]
+        assert!(linenumber_block_expr_count.len() == 4);
+
+        let line_num: u64 = String::from_utf8(linenumber_block_expr_count[0].to_vec())
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let block: u64 = String::from_utf8(linenumber_block_expr_count[1].to_vec())
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+
+        let branch0 = cantor_pair(line_num, block);
+        let branch = cantor_pair_u128(branch0.into(), file_index);
+
+        branches.insert(branch);
+    }
+
+    assert!(!branches.is_empty());
+    Ok(branches.len() as u64)
+}
+
+/// read coverage report file and create a BTreeSet from branches covered in the coverage file
+pub fn check_report_coverage(
+    cfg: &Arc<Config>,
+    profile_filepath: &Path,
+    sanitizer_idx: usize,
+) -> CoverageResult {
+    let mut prof_report = Command::new(&cfg.llvm_cov_path)
+        .args([
+            "export",
+            "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp",
+            "--check-binary-ids",
+            "--num-threads=1",
+            "--skip-expansions",
+            "--skip-functions",
+            "--format=lcov",
+            "--instr-profile",
+            &profile_filepath.display().to_string(),
+            "--object",
+            &compiled_executable_path(cfg, SANITIZERS[sanitizer_idx])
+                .display()
+                .to_string(),
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("executing llvm-cov");
+
+    let mut cov: BTreeSet<u128> = BTreeSet::new();
+    let mut file_index = 0;
+
+    let linereader = BufReader::new(prof_report.stdout.as_mut().unwrap());
+
+    for line_result in linereader.split(b'\n') {
+        let line = line_result.unwrap();
+        if line.len() >= 2 && &line[0..2] == b"SF" {
+            //println!("SOURCE FILE {}", String::from_utf8(line.to_vec()).unwrap());
+            file_index += 1;
+            continue;
+        }
+        if !(line.len() >= 4
+            && &line[0..4] == b"BRDA"
+            && match line.split(|l| l == &b',').last().unwrap() {
+                b"-" => false,
+                b"0" => false,
+                _count => true,
+            })
+        {
+            continue;
+        }
+        let linenumber_block_expr_count = &line
+            .splitn(2, |l| l == &b':')
+            .last()
+            .unwrap()
+            .split(|l| l == &b',')
+            .collect::<Vec<_>>();
+
+        #[cfg(debug_assertions)]
+        assert!(linenumber_block_expr_count.len() == 4);
+
+        let line_num: u64 = String::from_utf8(linenumber_block_expr_count[0].to_vec())
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let block: u64 = String::from_utf8(linenumber_block_expr_count[1].to_vec())
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+
+        let branch0 = cantor_pair(line_num, block);
+        let branch = cantor_pair_u128(branch0.into(), file_index);
+
+        cov.insert(branch);
+    }
+    prof_report.wait().unwrap();
+
+    #[cfg(debug_assertions)]
+    assert!(prof_report
+        .stdout
+        .unwrap()
+        .bytes()
+        .collect::<Vec<Result<u8, std::io::Error>>>()
+        .is_empty());
+
+    if cov.is_empty() {
+        return CoverageResult::Err();
+    }
+    CoverageResult::Ok(cov)
+}
+
+// move trial to Exec context ??
+/// execute the target program with a new test input.
+/// records profile data to the output directory.
+pub fn trial(
+    cfg: &Arc<Config>,
+    args: &[u8],
+    stdin: &[u8],
+    hash_num: usize,
+) -> (ExecResult<Output>, BTreeSet<u128>) {
+    let profraw = cfg.output_dir.join(format!(
+        "{}.profraw",
+        current().name().expect("getting thread name")
+    ));
+    let profdata = cfg.output_dir.join(format!(
+        "{}.profdata",
+        current().name().expect("getting thread name")
+    ));
+
+    let sanitizer_idx: usize = hash_num % SANITIZERS.len();
+    let output = exec_target(cfg, sanitizer_idx, &profraw, stdin, args.to_vec());
+
+    #[cfg(debug_assertions)]
+    assert!(profraw.exists()); // ensure profile data was generated
+
+    if index_target_report(cfg, &profraw, &profdata).is_err() {
+        eprintln!("Corrupted report file!");
+        return (ExecResult::CoverageError(), BTreeSet::new());
+    };
+
+    remove_file(&profraw).expect("removing raw profile data");
+
+    let cov = match check_report_coverage(cfg, &profdata, sanitizer_idx) {
+        CoverageResult::Ok(cov) => cov,
+        CoverageResult::Err() => BTreeSet::new(),
+    };
+
+    remove_file(&profdata).expect("removing coverage profile data");
+
+    (output, cov)
+}
+
+/// If the fuzz execution result for a given mutation yielded new coverage,
+/// add it to the cov_corpus.
+/// If the mutation yielded a crash with new coverage, add it to the crash_corpus.
+/// Results will be logged to the output directory.
+fn handle_trial_result(
+    cfg: &Arc<Config>,
+    result: &ExecResult<Output>,
+    corpus_entry: InputType,
+    cov_corpus: &mut CorpusType,
+    crash_corpus: &mut CorpusType,
+    i: &usize,
+) {
+    let total_coverage = match cov_corpus {
+        CorpusType::Bytes(c) => c.total_coverage.clone(),
+        CorpusType::Graph(c) => c.total_coverage.clone(),
+    };
+    let crash_coverage = match crash_corpus {
+        CorpusType::Bytes(c) => c.total_coverage.clone(),
+        CorpusType::Graph(c) => c.total_coverage.clone(),
+    };
+    let input_coverage = match corpus_entry {
+        InputType::Bytes(ref c) => c.coverage.clone(),
+        InputType::Graph(ref c) => c.coverage.clone(),
+    };
+    match result {
+        // if the report contains new coverage, add to corpus as BytesInput
+        ExecResult::Ok(_output) | ExecResult::Err(_output)
+            if !total_coverage.is_superset(&input_coverage) =>
+        {
+            log_new_coverage(&corpus_entry, i, cfg.plaintext);
+            match cov_corpus {
+                CorpusType::Bytes(cov_corpus) => {
+                    cov_corpus.add_and_distill_corpus(corpus_entry);
+                    cov_corpus
+                        .save(&cfg.output_dir.join(Path::new("corpus")))
+                        .expect("saving corpus to output directory");
+                }
+                CorpusType::Graph(cov_corpus) => {
+                    cov_corpus.add_and_distill_corpus(corpus_entry);
+                    //cov_corpus .save(&cfg.output_dir.join(Path::new("corpus")), stdin_graph.graph) .expect("saving corpus to output directory");
+                    eprintln!("TODO: Implement graph corpus saving");
+                }
+            }
+        }
+
+        // if the input resulted in a crash covering new code branches,
+        // add it to the crash log
+        ExecResult::Err(output) if !crash_coverage.is_superset(&input_coverage) => {
+            log_crash_new(&corpus_entry, i, &output.stderr, cfg.plaintext);
+
+            match crash_corpus {
+                CorpusType::Bytes(crash_corpus) => {
+                    crash_corpus.add_and_distill_corpus(corpus_entry);
+                    crash_corpus
+                        .save(&cfg.output_dir.join(Path::new("crashes")))
+                        .expect("saving crash corpus");
+                }
+                CorpusType::Graph(crash_corpus) => {
+                    crash_corpus.add_and_distill_corpus(corpus_entry);
+                    //crash_corpus .save(&cfg.output_dir.join(Path::new("crashes"))) .expect("saving crash corpus");
+                    eprintln!("TODO: Implement graph corpus saving");
+                }
+            }
+        }
+
+        // warn if exited before logging coverage
+        ExecResult::Ok(_o) | ExecResult::Err(_o) if input_coverage.is_empty() => {
+            eprintln!(
+                "\nError: could not read coverage from input!\nResult type: {:?}",
+                result
+            );
+        }
+
+        ExecResult::NonTerminatingErr(pid) => {
+            panic!("\nRECEIVED KILL SIGNAL FROM WORKER (PID={})...", pid);
+
+            //remove_file(fname).expect("removing input mutation file after abort");
+            //profile_target.wait().unwrap();
+            /*
+            let pkill_result = Command::new("kill")
+            .arg(pid.to_string())
+            .output()
+            .unwrap()
+            .status
+            .code()
+            .unwrap();
+            */
+            //eprintln!("PKILL RESULT {}", pkill.unwrap());
+            //eprintln!("DONE KILL PID={}...", pid);
+            //assert!(pkill_result == 0);
+            //eprintln!("\nNonTerminatingError: hopefully child process was killed already");
+        }
+
+        ExecResult::CoverageError() => {
+            eprintln!("unhandled CoverageError");
+        }
+
+        ExecResult::Ok(_o) => {
+            let cov = match corpus_entry {
+                InputType::Bytes(ref i) => &i.coverage,
+                InputType::Graph(ref i) => &i.coverage,
+            };
+            let check_duplicates = match cov_corpus {
+                CorpusType::Bytes(c) => c
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, input)| {
+                        if &input.coverage == cov {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .rev()
+                    .collect::<Vec<usize>>(),
+
+                CorpusType::Graph(c) => c
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, input)| {
+                        if &input.coverage == cov {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .rev()
+                    .collect::<Vec<usize>>(),
+            };
+
+            if !check_duplicates.is_empty() {
+                let mut duplicates: Vec<InputType> = vec![corpus_entry.clone()];
+                for i in check_duplicates {
+                    match cov_corpus {
+                        CorpusType::Bytes(ref mut c) => {
+                            duplicates.push(InputType::Bytes(c.inputs.remove(i)));
+                        }
+                        CorpusType::Graph(ref mut c) => {
+                            duplicates.push(InputType::Graph(c.inputs.remove(i)));
+                        }
+                    };
+                }
+
+                duplicates.sort();
+                let keep = duplicates.remove(0);
+                match cov_corpus {
+                    CorpusType::Bytes(ref mut c) => match keep {
+                        InputType::Bytes(i) => {
+                            c.inputs.push(i);
+                        }
+                        _ => panic!(),
+                    },
+                    CorpusType::Graph(ref mut c) => match keep {
+                        InputType::Graph(i) => {
+                            c.inputs.push(i);
+                        }
+                        _ => panic!(),
+                    },
+                };
+            }
+        }
+
+        ExecResult::Err(_o) => {
+            let cov = match corpus_entry {
+                InputType::Bytes(ref i) => &i.coverage,
+                InputType::Graph(ref i) => &i.coverage,
+            };
+            let check_duplicates = match crash_corpus {
+                CorpusType::Bytes(c) => c
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, input)| {
+                        if &input.coverage == cov {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .rev()
+                    .collect::<Vec<usize>>(),
+
+                CorpusType::Graph(c) => c
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, input)| {
+                        if &input.coverage == cov {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .rev()
+                    .collect::<Vec<usize>>(),
+            };
+            if !check_duplicates.is_empty() {
+                let mut duplicates: Vec<InputType> = vec![corpus_entry.clone()];
+                for i in check_duplicates {
+                    match crash_corpus {
+                        CorpusType::Bytes(ref mut c) => {
+                            duplicates.push(InputType::Bytes(c.inputs.remove(i)));
+                        }
+                        CorpusType::Graph(ref mut c) => {
+                            duplicates.push(InputType::Graph(c.inputs.remove(i)));
+                        }
+                    };
+                }
+
+                duplicates.sort();
+                let keep = duplicates.remove(0);
+                match crash_corpus {
+                    CorpusType::Bytes(ref mut c) => match keep {
+                        InputType::Bytes(i) => {
+                            c.inputs.push(i);
+                        }
+                        _ => panic!(),
+                    },
+                    CorpusType::Graph(ref mut c) => match keep {
+                        InputType::Graph(i) => {
+                            c.inputs.push(i);
+                        }
+                        _ => panic!(),
+                    },
+                };
+            }
+        }
+    }
+}
+
+pub fn prepare_mutation_bytes(cov_corpus: &CorpusType, engine: &mut Mutation) -> InputType {
+    match cov_corpus {
+        CorpusType::Bytes(c) => {
+            let idx = engine.hashfunc() % c.inputs.len();
+            engine.data = c.inputs[idx].data.clone();
+            engine.mutate();
+            InputType::Bytes(BytesInput {
+                data: engine.data.clone(),
+                args: Vec::new(), /* args will be populated by exec_target from cfg.run_args */
+                //coverage: BTreeSet::new(),
+                coverage: c.inputs[idx].coverage.clone(),
+            })
+        }
+        _ => panic!(),
+    }
+}
+
+pub fn prepare_mutation_graph(
+    cov_corpus: &mut CorpusType,
+    engine: &mut Mutation,
+    arg_grammar: &GraphTree,
+    grammar: &GraphTree,
+) -> InputType {
+    let arg_permutation = arg_grammar.grammar_permutation(engine);
+    let stdin_permutation = grammar.grammar_permutation(engine);
+
+    match cov_corpus {
+        CorpusType::Graph(c) => {
+            if !c.inputs.is_empty() {
+                let idx = engine.hashfunc() % c.inputs.len();
+                let (p1, p2) =
+                    grammar.swap_nodes(stdin_permutation, c.inputs[idx].encoding.clone(), engine);
+                InputType::Graph(GraphInput {
+                    encoding: p1,
+                    args: arg_permutation.clone(),
+                    coverage: BTreeSet::new(),
+                    //coverage: c.inputs[idx].coverage.clone(),
+                })
+            } else {
+                InputType::Graph(GraphInput {
+                    encoding: stdin_permutation.clone(),
+                    args: arg_permutation.clone(),
+                    coverage: BTreeSet::new(),
+                })
+            }
+        }
+        _ => panic!(),
+    }
+}
+
 impl Exec {
-    /// compile and instrument the target//.
-    pub fn new(cfg: Config) -> Result<Exec, Box<dyn std::error::Error>> {
+    /// compile and instrument the target
+    pub fn new(cfg: &Config) -> Self {
+        let exec = Exec {
+            cfg: cfg.clone().into(),
+            _private: (),
+        };
+        Exec::setup(&exec.cfg);
+
+        exec
+    }
+
+    /// compile and instrument target binaries (one for each sanitizer)
+    fn setup(cfg: &Config) {
         // ensure cc is clang >= v14.0.0
         let check_cc_ver = Command::new(&cfg.cc_path)
             .arg("--version")
@@ -272,8 +829,7 @@ impl Exec {
                         .output()
                         .expect("compiling instrumented target");
                     if !setup_result.stderr.is_empty()
-                        && !byte_index(&b"error: ".to_vec(), &setup_result.stderr.to_vec())
-                            .is_empty()
+                        && !byte_index(b"error: ".as_ref(), &setup_result.stderr).is_empty()
                     {
                         panic!(
                             "compile failed:\n{}\n{}",
@@ -295,310 +851,30 @@ impl Exec {
             handle.join().expect("compiling target");
         }
         println!("done compiling");
-
-        Ok(Exec {
-            cfg: cfg.into(),
-            //_private: (),
-        })
-    }
-
-    pub fn prepare_mutation(
-        &self,
-        args_bytes: &[u8],
-        cov_corpus: &Corpus,
-        engine: &mut Mutation,
-        grammar: &Option<Box<GrammarTree>>,
-    ) -> CorpusInput {
-        if self.cfg.grammar.is_some() {
-            let tree = grammar.as_ref().unwrap();
-            let generated_bytes: Vec<u8> = tree.grammar_permutation(engine);
-            if cov_corpus.inputs.is_empty() {
-                CorpusInput {
-                    data: generated_bytes,
-                    args: args_bytes.to_vec(),
-                    coverage: BTreeSet::new(),
-                    lifetime: 0,
-                }
-            } else {
-                let idx = engine.hashfunc() % cov_corpus.inputs.len();
-                let (c1, c2) =
-                    tree.crossover(&generated_bytes, &cov_corpus.inputs[idx].data, engine);
-                /*
-                println!(
-                "{}\t\t{}",
-                String::from_utf8_lossy(&c1),
-                String::from_utf8_lossy(&c2),
-                );
-                */
-                CorpusInput {
-                    data: if engine.hashfunc() % 2 == 0 { c1 } else { c2 },
-                    args: args_bytes.to_vec(),
-                    coverage: BTreeSet::new(),
-                    lifetime: 0,
-                }
-            }
-        } else if self.cfg.mutate_stdin {
-            let idx = engine.hashfunc() % cov_corpus.inputs.len();
-            engine.data = cov_corpus.inputs[idx].data.clone();
-            //if i >= initial_corpus_size {
-            engine.mutate();
-            //}
-            let payload = engine.data.clone();
-            CorpusInput {
-                data: payload,
-                args: args_bytes.to_vec(),
-                coverage: cov_corpus.inputs[idx].coverage.clone(),
-                lifetime: cov_corpus.inputs[idx].lifetime,
-            }
-        } else {
-            CorpusInput {
-                data: Vec::new(),
-                args: args_bytes.to_vec(),
-                coverage: BTreeSet::new(),
-                lifetime: 0,
-            }
-        }
-    }
-
-    /// execute the target program with a new test input.
-    /// records profile data to the output directory.
-    pub fn trial<'main_loop>(
-        &'main_loop mut self,
-        test_input: &'main_loop mut CorpusInput,
-        hash_num: usize,
-    ) -> ExecResult<Output> {
-        let profraw = self.cfg.output_dir.join(format!(
-            "{}.profraw",
-            current().name().expect("getting thread name")
-        ));
-        let profdata = self.cfg.output_dir.join(format!(
-            "{}.profdata",
-            current().name().expect("getting thread name")
-        ));
-
-        let sanitizer_idx: usize = hash_num % SANITIZERS.len();
-        let output = exec_target(
-            &self.cfg,
-            sanitizer_idx,
-            &profraw,
-            &test_input.data,
-            test_input.args.clone(),
-        );
-
-        #[cfg(debug_assertions)]
-        assert!(profraw.exists()); // ensure profile data was generated
-
-        if self.index_target_report(&profraw, &profdata).is_err() {
-            eprintln!("Corrupted report file!");
-            return ExecResult::CoverageError();
-        };
-        remove_file(&profraw).expect("removing raw profile data");
-
-        let cov = match self.check_report_coverage(&profdata, sanitizer_idx) {
-            CoverageResult::Ok(cov) => cov,
-            CoverageResult::Err() => {
-                #[cfg(debug_assertions)]
-                assert!(match &output {
-                    ExecResult::Err(_)
-                    | ExecResult::NonTerminatingErr(..)
-                    | ExecResult::CoverageError() => true,
-                    ExecResult::Ok(_o) => {
-                        eprintln!(
-                            "\ncrashing input: {}\nresult: {}\noutput status: {}",
-                            test_input,
-                            String::from_utf8_lossy(&_o.stderr),
-                            _o.status.code().unwrap()
-                        );
-                        _o.status.code().unwrap() == 1
-                    }
-                });
-                test_input.coverage.clone()
-            }
-        };
-        remove_file(&profdata).expect("removing coverage profile data");
-
-        // if the program crashes during execution, code coverage checking may
-        // yield an empty set. in this case the parent mutation coverage is used
-        let new_coverage: BTreeSet<u128> = match output {
-            ExecResult::Ok(_) => cov,
-            ExecResult::Err(_) => {
-                if cov.is_empty() {
-                    test_input.coverage.clone()
-                } else {
-                    cov
-                }
-            }
-            ExecResult::NonTerminatingErr(..) => test_input.coverage.clone(),
-            ExecResult::CoverageError(..) => test_input.coverage.clone(),
-        };
-        //test_input.lifetime += 1;
-        test_input.coverage = new_coverage;
-
-        output
-    }
-
-    /// If the fuzz execution result for a given mutation yielded new coverage,
-    /// add it to the cov_corpus.
-    /// If the mutation yielded a crash with new coverage, add it to the crash_corpus.
-    /// Results will be logged to the output directory.
-    pub fn handle_trial_result(
-        &self,
-        result: &ExecResult<Output>,
-        mut corpus_entry: CorpusInput,
-        cov_corpus: &mut Corpus,
-        crash_corpus: &mut Corpus,
-    ) {
-        match result {
-            // if the report contains new coverage, add to corpus as CorpusInput
-            ExecResult::Ok(_output) | ExecResult::Err(_output)
-                if !cov_corpus
-                    .total_coverage
-                    .is_superset(&corpus_entry.coverage) =>
-            {
-                corpus_entry.lifetime += 1;
-                log_new_coverage(&corpus_entry, self.cfg.plaintext);
-                cov_corpus.add_and_distill_corpus(corpus_entry);
-                cov_corpus
-                    .save(&self.cfg.output_dir.join(Path::new("corpus")))
-                    .expect("saving corpus to output directory");
-            }
-
-            // if the input resulted in a crash covering new code branches,
-            // add it to the crash log
-            ExecResult::Err(output)
-                if !crash_corpus
-                    .total_coverage
-                    .is_superset(&corpus_entry.coverage) =>
-            {
-                log_crash_new(&corpus_entry, &output.stderr, self.cfg.plaintext);
-                crash_corpus.add_and_distill_corpus(corpus_entry);
-                crash_corpus
-                    .save(&self.cfg.output_dir.join(Path::new("crashes")))
-                    .expect("saving crash corpus");
-            }
-
-            // warn if exited before logging coverage
-            ExecResult::Ok(_o) | ExecResult::Err(_o) if corpus_entry.coverage.is_empty() => {
-                eprintln!("\nError: could not read coverage from crash!",);
-                /*
-                panic!(
-                "{:?}\n{}\n{}",
-                _o,
-                String::from_utf8_lossy(&args),
-                String::from_utf8_lossy(&corpus_entry.data)
-                );
-                */
-            }
-
-            ExecResult::NonTerminatingErr(pid) => {
-                //assert!(pid != 0);
-                panic!("\nRECEIVED KILL SIGNAL FROM WORKER (PID={})...", pid);
-
-                //remove_file(fname).expect("removing input mutation file after abort");
-                //profile_target.wait().unwrap();
-                /*
-                let pkill_result = Command::new("kill")
-                .arg(pid.to_string())
-                .output()
-                .unwrap()
-                .status
-                .code()
-                .unwrap();
-                */
-                //eprintln!("PKILL RESULT {}", pkill.unwrap());
-                //eprintln!("DONE KILL PID={}...", pid);
-                //assert!(pkill_result == 0);
-                //eprintln!("\nNonTerminatingError: hopefully child process was killed already");
-            }
-
-            ExecResult::CoverageError() => {
-                eprintln!("unhandled CoverageError");
-            }
-
-            ExecResult::Ok(_o) => {
-                let check_duplicates = cov_corpus
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, input)| {
-                        if input.coverage == corpus_entry.coverage {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                    .rev()
-                    .collect::<Vec<usize>>();
-                if !check_duplicates.is_empty() {
-                    let mut duplicates: Vec<CorpusInput> = vec![corpus_entry.clone()];
-                    for i in check_duplicates {
-                        duplicates.push(cov_corpus.inputs.remove(i));
-                    }
-
-                    duplicates.sort_by(|a, b| {
-                        if a.data.len() != b.data.len() {
-                            a.data.len().partial_cmp(&b.data.len()).unwrap()
-                        } else {
-                            a.data.partial_cmp(&b.data).unwrap()
-                        }
-                    });
-                    cov_corpus.inputs.push(duplicates.remove(0));
-                }
-            }
-
-            ExecResult::Err(_o) => {
-                let check_duplicates = crash_corpus
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, input)| {
-                        if input.coverage == corpus_entry.coverage {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                    .rev()
-                    .collect::<Vec<usize>>();
-                if !check_duplicates.is_empty() {
-                    let mut duplicates: Vec<CorpusInput> = vec![corpus_entry.clone()];
-                    for i in check_duplicates {
-                        duplicates.push(crash_corpus.inputs.remove(i));
-                    }
-
-                    duplicates.sort_by(|a, b| {
-                        if a.data.len() != b.data.len() {
-                            a.data.len().partial_cmp(&b.data.len()).unwrap()
-                        } else {
-                            a.data.partial_cmp(&b.data).unwrap()
-                        }
-                    });
-                    crash_corpus.inputs.push(duplicates.remove(0));
-                }
-            }
-        }
     }
 
     /// main loop:
     /// send input to target, read the coverage resulting from the input, and
     /// update the corpus with inputs yielding new coverage
-    pub fn _main_loop(
-        &mut self,
-        cov_corpus: &mut Corpus,
-        mutation: &mut Mutation,
-    ) -> Result<(), Box<dyn Error>> {
-        let mut crash_corpus = Corpus::new();
-
+    pub fn exec_loop(
+        &self,
+        //cfg: Arc<Config>,
+        cov_corpus: &mut CorpusType,
+        crash_corpus: &mut CorpusType,
+        engine: &mut Mutation,
+        args_graph: Option<Box<GraphTree>>,
+        stdin_graph: Option<Box<GraphTree>>,
+    ) {
         // worker thread pool
-        let (sender, receiver) = channel::<(usize, CorpusInput, ExecResult<Output>)>();
-        let num_cpus: usize = available_parallelism()?.into();
+        let (sender, receiver) = channel::<(usize, InputType, ExecResult<Output>)>();
+        let num_cpus: usize = available_parallelism().expect("checking CPU count").into();
         let pool = ThreadPoolBuilder::new()
             .thread_name(|f| format!("ecfuzz-worker-{}", f))
             .num_threads(num_cpus)
             .build()
             .unwrap();
 
-        let mut base_args: Vec<u8> = self
+        let base_args: Vec<u8> = self
             .cfg
             .run_args
             .iter()
@@ -610,48 +886,20 @@ impl Exec {
             .collect::<Vec<Vec<u8>>>()
             .concat();
 
-        let grammar = if self.cfg.grammar.is_none() {
-            None
-        } else {
-            let grammar_path = self.cfg.grammar.as_ref().unwrap();
-            //base_args.push(b' ');
-            let tree = Box::new(GrammarTree::from_file(grammar_path));
-
-            Some(tree)
-        };
-
-        let args_grammar = if self.cfg.run_arg_grammar.is_none() {
-            None
-        } else {
-            let grammar_path = self.cfg.run_arg_grammar.as_ref().unwrap();
-            let tree = Box::new(GrammarTree::from_file(grammar_path));
-            base_args.splice(base_args.len().., tree.grammar_permutation(mutation));
-            Some(tree)
-        };
-
-        let base_stdinput = match self.cfg.mutate_stdin {
-            true => {
-                if self.cfg.grammar.is_some() {
-                    grammar.as_ref().unwrap().grammar_permutation(mutation)
-                } else {
-                    cov_corpus.inputs[0].data.clone()
-                }
-            }
-            false => [].to_vec(),
-        };
-
-        let branch_count = self.count_branch_total(0, &base_stdinput, &base_args)?;
+        let branch_count = count_branch_total(&self.cfg, 0, &[], &base_args)
+            .expect("checking number of code branches in target executable");
 
         assert!(num_cpus <= FUZZING_QUEUE_SIZE / 4);
         assert!(self.cfg.iterations >= FUZZING_QUEUE_SIZE);
 
         // store finished fuzzing jobs here in the order they finish
         // this allows retrieval of jobs in a deterministic order
-        let mut finished_map: HashMap<usize, (CorpusInput, ExecResult<Output>)> =
+        let mut finished_map: HashMap<usize, (InputType, ExecResult<Output>)> =
             HashMap::with_capacity(FUZZING_QUEUE_SIZE);
 
-        let mut input_history: Vec<Vec<u8>> = Vec::with_capacity(FUZZING_QUEUE_SIZE);
-        let mut input_arg_history: Vec<Vec<u8>> = Vec::with_capacity(FUZZING_QUEUE_SIZE);
+        //let mut input_history: Vec<Vec<u8>> = Vec::with_capacity(FUZZING_QUEUE_SIZE);
+        //let mut input_arg_history: Vec<Vec<u8>> = Vec::with_capacity(FUZZING_QUEUE_SIZE);
+        let mut input_history: Vec<InputType> = Vec::with_capacity(FUZZING_QUEUE_SIZE);
 
         let timer_start = Instant::now();
         let mut checkpoint = Instant::now();
@@ -663,31 +911,60 @@ impl Exec {
 
         for i in 0..iter_count + FUZZING_QUEUE_SIZE {
             if i < iter_count - (FUZZING_QUEUE_SIZE) {
-                // mutate the input
-                let args_grammar = args_grammar.clone();
-                let args_bytes = if let Some(g) = args_grammar {
-                    g.grammar_permutation(mutation)
-                } else {
-                    [].to_vec()
+                let cfg_clone = self.cfg.clone();
+                let mutation_trial = match cov_corpus {
+                    CorpusType::Bytes(..) => prepare_mutation_bytes(cov_corpus, engine),
+                    CorpusType::Graph(..) => prepare_mutation_graph(
+                        cov_corpus,
+                        engine,
+                        args_graph.as_ref().unwrap(),
+                        stdin_graph.as_ref().unwrap(),
+                    ),
                 };
 
-                let mut mutation_trial =
-                    self.prepare_mutation(&args_bytes, cov_corpus, mutation, &grammar);
+                input_history.push(mutation_trial.clone());
 
+                let (args, stdin) = match mutation_trial {
+                    InputType::Bytes(ref m) => (m.args.clone(), m.data.clone()),
+                    InputType::Graph(ref m) => (
+                        args_graph.as_ref().unwrap().decode(&m.args),
+                        stdin_graph.as_ref().unwrap().decode(&m.encoding),
+                    ),
+                };
+
+                let prev_cov = match mutation_trial {
+                    InputType::Bytes(ref i) => i.coverage.clone(),
+                    InputType::Graph(ref i) => i.coverage.clone(),
+                };
+
+                let hash_num = engine.hashfunc();
                 let sender = sender.clone();
-                let mut exec_clone = Exec {
-                    cfg: self.cfg.clone(),
-                };
-                let hash_num = mutation.hashfunc();
-
-                // record history of input
-                input_history.push(mutation_trial.data.clone());
-                input_arg_history.push(mutation_trial.args.clone());
 
                 pool.spawn_fifo(move || {
-                    let result = exec_clone.trial(&mut mutation_trial, hash_num);
+                    let (result, result_cov) = trial(&cfg_clone, &args, &stdin, hash_num);
+                    let mut mutation = mutation_trial.clone();
+                    if !result_cov.is_empty() {
+                        match mutation {
+                            InputType::Graph(ref mut i) => {
+                                i.coverage = result_cov;
+                            }
+                            InputType::Bytes(ref mut i) => {
+                                i.coverage = result_cov;
+                            }
+                        };
+                    } else {
+                        match mutation {
+                            InputType::Graph(ref mut i) => {
+                                i.coverage = prev_cov;
+                            }
+                            InputType::Bytes(ref mut i) => {
+                                i.coverage = prev_cov;
+                            }
+                        };
+                    }
+
                     sender
-                        .send((i, mutation_trial, result))
+                        .send((i, mutation, result))
                         .expect("sending results from worker");
                 });
             }
@@ -701,7 +978,9 @@ impl Exec {
             // add finished results to a HashMap, and retrieve the latest
             // result from the map at an offset greater than the number of workers
             if i <= self.cfg.iterations {
-                let (n, corpus_entry_unordered, result_unordered) = receiver.recv()?;
+                let (n, corpus_entry_unordered, result_unordered) = receiver
+                    .recv()
+                    .expect("receiving results from parallel worker");
                 finished_map.insert(n, (corpus_entry_unordered, result_unordered));
             }
 
@@ -715,73 +994,77 @@ impl Exec {
 
             // get completed fuzz jobs starting at the earliest index
             //.expect("retrieving execution result from finished map");
-            let (corpus_entry, result) = finished_map
+            let (corpus_entry, result): (InputType, ExecResult<Output>) = finished_map
                 .remove(&(i - FUZZING_QUEUE_SIZE * 2))
                 .unwrap_or_else(|| {
-                    let failed_args = input_arg_history.remove(0);
                     let failed_input = input_history.remove(0);
 
                     let outpath1 = self.cfg.output_dir.join(PathBuf::from("FATAL.crash"));
                     let mut out1 = std::fs::File::create(&outpath1).unwrap();
-                    out1.write_all(&failed_input).unwrap();
-
                     let outpath2 = self.cfg.output_dir.join(PathBuf::from("FATAL.args"));
                     let mut out2 = std::fs::File::create(outpath2).unwrap();
-                    out2.write_all(&failed_args).unwrap();
 
+                    match failed_input {
+                        InputType::Bytes(ref i) => {
+                            out1.write_all(&i.data).unwrap();
+                            out2.write_all(&i.args).unwrap();
+                        }
+                        InputType::Graph(ref i) => {
+                            out1.write_all(&stdin_graph.as_ref().unwrap().decode(&i.encoding))
+                                .unwrap();
+                            out2.write_all(&args_graph.as_ref().unwrap().decode(&i.args))
+                                .unwrap();
+                        }
+                    }
 
                     let wait_timer = Instant::now();
                     while wait_timer.elapsed().as_millis() <= 2000 {
-                        let retry_get_result = finished_map
-                            .remove(&(i - FUZZING_QUEUE_SIZE * 2));
-                        if let Some((corpus_entry, result))  = retry_get_result {
+                        let retry_get_result = finished_map.remove(&(i - FUZZING_QUEUE_SIZE * 2));
+                        if let Some((corpus_entry, result)) = retry_get_result {
                             return (corpus_entry, result);
                         }
                     }
 
                     eprintln!(
-                        "\n{}Warning: killed non-terminating process! {} i: {}\nARGS: {}\nINPUT:\n{}\ndumping stdin to {}",
-                        colorcode_red,
-                        colorcode_normal,
-                        i,
-                        String::from_utf8_lossy(&failed_args),
-                        String::from_utf8_lossy(&failed_input),
-                        outpath1.display(),
-                        );
+                    "\n{}Warning: killed non-terminating process! {} exec: {}\ndumping stdin to {}",
+                    colorcode_red,
+                    colorcode_normal,
+                    i,
+                    outpath1.display(),
+                );
 
                     /*
-                       if std::env::var("ECFUZZ_ATTACH_DEBUGGER").is_ok() {
-                       eprintln!("ATTACHING LLDB TO PID {}", pid.trim());
+                    if std::env::var("ECFUZZ_ATTACH_DEBUGGER").is_ok() {
+                    eprintln!("ATTACHING LLDB TO PID {}", pid.trim());
 
-                       let mut attach_debug = Command::new ("/opt/bin/lldb")
-                       .arg("-p")
-                       .arg(pid.trim())
-                       .stdin(Stdio::inherit())
-                       .stdout(Stdio::inherit())
-                       .stderr(Stdio::inherit())
-                       .spawn()
-                       .unwrap();
-                       attach_debug.wait().unwrap();
-                       } else {
-                       eprintln!("Killing nonterminating process {}!\nTo attach a debugger instead, set ECFUZZ_ATTACH_DEBUGGER=1", pid.trim());
-                       let pkill = Command::new("kill").arg(pid.trim()).output().unwrap().status.code();
-                       pkill.unwrap();
-                       }
-                       */
-                    (
-                        CorpusInput {
-                            coverage: BTreeSet::new(),
-                            args: Vec::new(),
-                            data: Vec::new(),
-                            lifetime: 0,
-                        },
-                        ExecResult::NonTerminatingErr(0),
-                        )
+                    let mut attach_debug = Command::new ("/opt/bin/lldb")
+                    .arg("-p")
+                    .arg(pid.trim())
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap();
+                    attach_debug.wait().unwrap();
+                    } else {
+                    eprintln!("Killing nonterminating process {}!\nTo attach a debugger instead, set ECFUZZ_ATTACH_DEBUGGER=1", pid.trim());
+                    let pkill = Command::new("kill").arg(pid.trim()).output().unwrap().status.code();
+                    pkill.unwrap();
+                    }
+                    */
+                    (failed_input.clone(), ExecResult::NonTerminatingErr(0))
                 });
 
             // if the expected data isn't at the front of the queue, consider it
             // to be abandoned by unresponsive process
-            if corpus_entry.data != input_history[0].clone() {
+            let output_matches_expected = match (&corpus_entry, &input_history[0]) {
+                (InputType::Bytes(i), InputType::Bytes(h)) => i.data == h.data && i.args == h.args,
+                (InputType::Graph(i), InputType::Graph(h)) => {
+                    i.encoding == h.encoding && i.args == h.args
+                }
+                _ => panic!(),
+            };
+            if !output_matches_expected {
                 if !(matches!(result, ExecResult::NonTerminatingErr(..))) {
                     match result {
                         ExecResult::Err(e) => {
@@ -794,7 +1077,6 @@ impl Exec {
                 };
             } else {
                 input_history.remove(0);
-                input_arg_history.remove(0);
             };
 
             // remove tracking for abandoned items
@@ -807,14 +1089,21 @@ impl Exec {
                 finished_map.remove(&k);
             }
 
-            self.handle_trial_result(&result, corpus_entry, cov_corpus, &mut crash_corpus);
+            handle_trial_result(
+                &self.cfg,
+                &result,
+                corpus_entry,
+                cov_corpus,
+                crash_corpus,
+                &i,
+            );
 
             // print some status info
             if !self.cfg.plaintext && checkpoint.elapsed() > std::time::Duration::from_millis(125) {
                 log_status_msg(
                     &self.cfg,
                     cov_corpus,
-                    &crash_corpus,
+                    crash_corpus,
                     branch_count,
                     i,
                     &timer_start,
@@ -825,7 +1114,7 @@ impl Exec {
         log_status_msg(
             &self.cfg,
             cov_corpus,
-            &crash_corpus,
+            crash_corpus,
             branch_count,
             self.cfg.iterations,
             &timer_start,
@@ -833,252 +1122,31 @@ impl Exec {
 
         assert!(finished_map.is_empty());
         assert!(receiver.try_recv().is_err());
-
-        Ok(())
-    }
-
-    /// convert raw profile data to an indexed file format
-    fn index_target_report(
-        &self,
-        raw_profile_filepath: &Path,
-        profile_filepath: &Path,
-    ) -> Result<(), ()> {
-        let prof_merge_args = &[
-            "merge".to_string(),
-            "-sparse".to_string(),
-            //"--instr".to_string(),
-            raw_profile_filepath.display().to_string(),
-            "--output".to_string(),
-            profile_filepath.display().to_string(),
-        ];
-        let prof_merge_result = Command::new(&self.cfg.llvm_profdata_path)
-            .args(prof_merge_args)
-            .output()
-            .expect("executing llvm-profdata");
-        if !prof_merge_result.status.success() {
-            eprintln!(
-                "Could not merge profile data. {} Args:\n{} {}\n",
-                String::from_utf8_lossy(&prof_merge_result.stderr),
-                &self.cfg.llvm_profdata_path.display(),
-                &prof_merge_args.join(" ")
-            );
-            return Err(());
-        }
-        Ok(())
-    }
-
-    /// count the number of code branches in the coverage file
-    pub fn count_branch_total(
-        &mut self,
-        sanitizer_idx: usize,
-        base_input: &[u8],
-        base_args: &[u8],
-    ) -> Result<u64, Box<dyn std::error::Error>> {
-        let profraw = self.cfg.output_dir.join(format!(
-            "{}.profraw",
-            current().name().expect("getting thread name")
-        ));
-        let profdata = self.cfg.output_dir.join(format!(
-            "{}.profdata",
-            current().name().expect("getting thread name")
-        ));
-
-        let output = exec_target(&self.cfg, 0, &profraw, base_input, base_args.to_owned());
-        if let ExecResult::Err(o) = output {
-            if o.status.code().is_none() {
-                panic!(
-                    "could not get status code from target!\nINPUT {}\nARGS {}\nstderr: {:#?}",
-                    String::from_utf8_lossy(base_input),
-                    String::from_utf8_lossy(base_args),
-                    String::from_utf8_lossy(&o.stderr),
-                );
-            }
-        }
-
-        self.index_target_report(&profraw, &profdata).unwrap();
-
-        remove_file(profraw).expect("removing raw profile data");
-
-        let prof_report = Command::new(&self.cfg.llvm_cov_path)
-            .args([
-                "export",
-                "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp|StandaloneFuzzTargetMain.c",
-                "--check-binary-ids",
-                "--num-threads=1",
-                "--skip-expansions",
-                "--skip-functions",
-                "--format=lcov",
-                "--instr-profile",
-                &profdata.display().to_string(),
-                "--object",
-                &compiled_executable_path(&self.cfg, SANITIZERS[sanitizer_idx])
-                    .display()
-                    .to_string(),
-            ])
-            .stdout(Stdio::piped())
-            .output()
-            .expect("executing llvm-cov");
-
-        if prof_report.stdout.is_empty() {
-            panic!(
-                "empty profdata: {:#?}\n{}",
-                profdata,
-                String::from_utf8_lossy(&prof_report.stderr)
-            );
-        }
-
-        remove_file(profdata).expect("removing coverage profile data");
-
-        let mut branches: BTreeSet<u128> = BTreeSet::new();
-        let mut file_index = 0;
-        let lines = prof_report.stdout.split(|byte| byte == &b'\n');
-        for line in lines {
-            if line.len() >= 2 && &line[0..2] == b"SF" {
-                file_index += 1;
-                continue;
-            }
-            if !(line.len() >= 4 && &line[0..4] == b"BRDA") {
-                continue;
-            }
-            let linenumber_block_expr_count = &line
-                .splitn(2, |l| l == &b':')
-                .last()
-                .unwrap()
-                .split(|l| l == &b',')
-                .collect::<Vec<_>>();
-
-            #[cfg(debug_assertions)]
-            assert!(linenumber_block_expr_count.len() == 4);
-
-            let line_num: u64 = String::from_utf8(linenumber_block_expr_count[0].to_vec())
-                .unwrap()
-                .parse::<u64>()
-                .unwrap();
-            let block: u64 = String::from_utf8(linenumber_block_expr_count[1].to_vec())
-                .unwrap()
-                .parse::<u64>()
-                .unwrap();
-
-            let branch0 = cantor_pair(line_num, block);
-            let branch = cantor_pair_u128(branch0.into(), file_index);
-
-            branches.insert(branch);
-        }
-
-        assert!(!branches.is_empty());
-        Ok(branches.len() as u64)
-    }
-
-    /// read coverage report file and create a BTreeSet from branches covered in the coverage file
-    pub fn check_report_coverage(
-        &self,
-        profile_filepath: &Path,
-        sanitizer_idx: usize,
-    ) -> CoverageResult {
-        let mut prof_report = Command::new(&self.cfg.llvm_cov_path)
-            .args([
-                "export",
-                "--ignore-filename-regex=libfuzz-driver.cpp|fuzz.cpp",
-                "--check-binary-ids",
-                "--num-threads=1",
-                "--skip-expansions",
-                "--skip-functions",
-                "--format=lcov",
-                "--instr-profile",
-                &profile_filepath.display().to_string(),
-                "--object",
-                &compiled_executable_path(&self.cfg, SANITIZERS[sanitizer_idx])
-                    .display()
-                    .to_string(),
-            ])
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("executing llvm-cov");
-
-        let mut cov: BTreeSet<u128> = BTreeSet::new();
-        let mut file_index = 0;
-
-        let linereader = BufReader::new(prof_report.stdout.as_mut().unwrap());
-
-        for line_result in linereader.split(b'\n') {
-            let line = line_result.unwrap();
-            if line.len() >= 2 && &line[0..2] == b"SF" {
-                //println!("SOURCE FILE {}", String::from_utf8(line.to_vec()).unwrap());
-                file_index += 1;
-                continue;
-            }
-            if !(line.len() >= 4
-                && &line[0..4] == b"BRDA"
-                && match line.split(|l| l == &b',').last().unwrap() {
-                    b"-" => false,
-                    b"0" => false,
-                    _count => true,
-                })
-            {
-                continue;
-            }
-            let linenumber_block_expr_count = &line
-                .splitn(2, |l| l == &b':')
-                .last()
-                .unwrap()
-                .split(|l| l == &b',')
-                .collect::<Vec<_>>();
-
-            #[cfg(debug_assertions)]
-            assert!(linenumber_block_expr_count.len() == 4);
-
-            let line_num: u64 = String::from_utf8(linenumber_block_expr_count[0].to_vec())
-                .unwrap()
-                .parse::<u64>()
-                .unwrap();
-            let block: u64 = String::from_utf8(linenumber_block_expr_count[1].to_vec())
-                .unwrap()
-                .parse::<u64>()
-                .unwrap();
-
-            let branch0 = cantor_pair(line_num, block);
-            let branch = cantor_pair_u128(branch0.into(), file_index);
-
-            cov.insert(branch);
-        }
-        prof_report.wait().unwrap();
-
-        #[cfg(debug_assertions)]
-        assert!(prof_report
-            .stdout
-            .unwrap()
-            .bytes()
-            .collect::<Vec<Result<u8, std::io::Error>>>()
-            .is_empty());
-
-        if cov.is_empty() {
-            return CoverageResult::Err();
-        }
-        CoverageResult::Ok(cov)
     }
 }
 
 /// log coverage increases to stdout
-fn log_new_coverage(new: &CorpusInput, plaintext: bool) {
+fn log_new_coverage(new: &InputType, i: &usize, plaintext: bool) {
     let line_replacement = if !plaintext { "\r" } else { "" };
     let colorcode_green = if !plaintext { "\x1b[32m" } else { "" };
     let colorcode_normal = if !plaintext { "\x1b[0m" } else { "" };
     println!(
-        "{}{}New coverage!{}{:>73}{:?}\n",
-        line_replacement, colorcode_green, colorcode_normal, "", new
+        "{}{}New coverage!{:>6}exec: {:<6}{:>57}{:?}\n",
+        line_replacement, colorcode_green, colorcode_normal, i, "", new
     );
 }
 
 /// log new crashes to stderr
-fn log_crash_new(new: &CorpusInput, stderr: &[u8], plaintext: bool) {
+fn log_crash_new(new: &InputType, i: &usize, stderr: &[u8], plaintext: bool) {
     let line_replacement = if !plaintext { "\r" } else { "\n" };
     let colorcode_red = if !plaintext { "\x1b[31m" } else { "" };
     let colorcode_normal = if !plaintext { "\x1b[0m" } else { "" };
     eprintln!(
-        "{}{}New crash!{}{:<76}{:?}\n{}",
+        "{}{}New crash!{:>6}exec: {:<6}{:<60}{:?}\n{}",
         line_replacement,
         colorcode_red,
         colorcode_normal,
+        i,
         "",
         &new,
         String::from_utf8_lossy(stderr)
@@ -1087,23 +1155,34 @@ fn log_crash_new(new: &CorpusInput, stderr: &[u8], plaintext: bool) {
 
 fn log_status_msg(
     cfg: &Arc<Config>,
-    cov_corpus: &Corpus,
-    crash_corpus: &Corpus,
+    cov_corpus: &CorpusType,
+    crash_corpus: &CorpusType,
     branch_count: u64,
     i: usize,
     timer_start: &std::time::Instant,
 ) {
-    print!("{}",format!(
-            "{}coverage: {:>5}/{:<5}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8}{}",
+    let total_coverage = match cov_corpus {
+        CorpusType::Bytes(c) => &c.total_coverage,
+        CorpusType::Graph(c) => &c.total_coverage,
+    };
+    let cov_inputs_len = match cov_corpus {
+        CorpusType::Bytes(c) => c.inputs.len(),
+        CorpusType::Graph(c) => c.inputs.len(),
+    };
+    let crash_inputs_len = match crash_corpus {
+        CorpusType::Bytes(c) => c.inputs.len(),
+        CorpusType::Graph(c) => c.inputs.len(),
+    };
+    print!( "{}coverage: {:>5}/{:<5}  exec/s: {:<4.0}  corpus size: {:<4} unique crashes: {:<4} i: {:<8}{}",
             if cfg.plaintext {""} else {"\r"},
-            cov_corpus.total_coverage.len(),
+            total_coverage.len(),
             branch_count,
             i as f64 / (timer_start.elapsed().as_millis() as f64 / 1000.0),
-            cov_corpus.inputs.len(),
-            crash_corpus.inputs.len(),
+            cov_inputs_len,
+            crash_inputs_len,
             i,
             if cfg.plaintext {"\n"} else {""},
-            ));
+            );
     stdout().flush().unwrap();
 }
 
@@ -1298,10 +1377,10 @@ fn exec_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::corpus::BytesCorpus;
 
     #[test]
     fn test_cli_demo() {
-        //let mut cfg: Config = Config::parse_args().expect("parsing config");
         let mut cfg: Config = Config::defaults();
         cfg.load_env();
         cfg.target_path = [PathBuf::from("./examples/cli/fuzz_target.c")].to_vec();
@@ -1313,18 +1392,22 @@ mod tests {
 
         let mut engine =
             Mutation::with_seed(cfg.dict_path.clone(), cfg.seed.clone(), cfg.multiplier);
-        let mut executor = Exec::new(cfg).expect("preparing execution context");
 
-        let mut corpus = Corpus::new();
-        for filepath in &executor.cfg.corpus_files {
-            corpus.append(&mut Corpus::load(filepath).expect("reading corpus file"))
+        let mut corpus = BytesCorpus::new();
+        for filepath in &cfg.corpus_files {
+            corpus.append(&mut BytesCorpus::load(filepath).expect("reading corpus file"))
         }
-        for filepath in &executor.cfg.corpus_dirs {
-            corpus.append(&mut Corpus::load(filepath).expect("reading corpus dir"))
+        for filepath in &cfg.corpus_dirs {
+            corpus.append(&mut BytesCorpus::load(filepath).expect("reading corpus dir"))
         }
 
-        executor
-            ._main_loop(&mut corpus, &mut engine)
-            .expect("executing main loop");
+        let executor = Exec::new(&cfg);
+        executor.exec_loop(
+            &mut CorpusType::Bytes(corpus),
+            &mut CorpusType::Bytes(BytesCorpus::new()),
+            &mut engine,
+            None,
+            None,
+        );
     }
 }

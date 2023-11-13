@@ -1,5 +1,4 @@
-START=<sql_query_sequence>
-<sql_query_sequence>=<sql_query> <sql_query> <sql_query>
+START=<sql_query>
 <sql_query>=CREATE <temp> TABLE <ifnexists> <schema-name><table1> (<columns> <table-constraint>);
 <sql_query>=INSERT <conflict-fallback> <schema-name><table1> <alias> VALUES (<column-vals>);
 <sql_query>=SELECT <grouping> <columns> FROM <table-or-subquery> WHERE <expr> <order-by>;
@@ -61,7 +60,7 @@ START=<sql_query_sequence>
 <conflict-fallback>=
 <conflict-fallback>=OR ABORT
 <conflict-fallback>=OR FAIL
-<conflict-fallback>=OR IGNORe
+<conflict-fallback>=OR IGNORE
 <conflict-fallback>=OR REPLACE
 <conflict-fallback>=OR ROLLBACK
 <alias>=

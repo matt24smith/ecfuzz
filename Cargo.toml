@@ -18,10 +18,15 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
-rayon = "1"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 async-std = "1.12"
 futures = {version = "*", features = ["executor",] }
+petgraph = {version = "0.6", features= ["graphmap"]}
+rayon = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [profile.release]
 lto = true
+#strip = true
+#opt-level = "s"
+codegen-units = 1
+#panic = "abort"

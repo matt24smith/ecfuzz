@@ -99,12 +99,20 @@ const MAGIC_VALUES: &[&Magic; 10] = &[
     &Magic::C((4, *b"\xff\xff\xff\x7f")),
 ];
 
+// this one is slower but reads better
+/*
+fn byte_index_2(key: &[u8], bytes: &[u8]) -> Vec<usize> {
+    bytes
+        .windows(key.len())
+        .enumerate()
+        .filter_map(|(i, x)| if x == key { Some(i) } else { None })
+        .collect()
+}
+*/
+
 /// find all indices of matching substring in a raw binary vector
-pub fn byte_index(key: &Vec<u8>, bytes: &Vec<u8>) -> Vec<usize> {
-    //assert!(key.len() <= bytes.len());
-
+pub fn byte_index(key: &[u8], bytes: &[u8]) -> Vec<usize> {
     let mut indices: Vec<usize> = vec![];
-
     if key.len() > bytes.len() {
         return indices;
     }
@@ -237,8 +245,10 @@ impl Mutation {
             }
         }
         self.hasher.write(&self.hash_seed);
-        self.hasher.digest() as usize
+        let result = self.hasher.digest() as usize;
         //self.hasher.finish() as usize
+        assert_ne!(result, 0);
+        result
     }
 
     /// Magic values.
@@ -503,6 +513,8 @@ mod tests {
         let bytes = b"0000A0000AAA".to_vec();
         let byteidx = byte_index(&b"A".to_vec(), &bytes);
         assert!(byteidx == vec![4, 9, 10, 11]);
+        //let test2 = byte_index_2(&b"A".to_vec(), &bytes);
+        //assert_eq!(byteidx, test2);
 
         let byteidx2 = byte_index(&b"AA".to_vec(), &bytes);
         assert!(byteidx2 == vec![9, 10]);

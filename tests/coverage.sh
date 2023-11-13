@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-#cargo clean
 rm -rf ./target/debug/deps/ecfuzz-*
 rm -rf ./target/release/deps/ecfuzz-*
 [[ `uname` = 'Darwin' ]] && PREFIX="xcrun"
@@ -34,12 +33,8 @@ $PREFIX llvm-cov show \
   $ALLOWED \
   $TARGET_BIN 
 
-  #--ignore-filename-regex="registry" \
-  #--ignore-filename-regex="fast-local" \
 $PREFIX llvm-cov report \
   --summary-only \
   --instr-profile ecfuzz.profdata \
   $ALLOWED \
   $TARGET_BIN
-
-echo "$1 $MODULE_NAME ALLOWED=$ALLOWED"
