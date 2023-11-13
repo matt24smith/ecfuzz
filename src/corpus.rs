@@ -5,10 +5,11 @@ use std::collections::BTreeSet;
 use std::fs::{create_dir_all, metadata, read, read_dir, remove_file, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::execute::{trial, Exec, SANITIZERS};
+use crate::execute::{trial, Exec, ExecResult, SANITIZERS};
 use crate::grammar_tree::{GraphMutation, GraphTree};
 
 /// each test input sent to the target program contains the byte vector
@@ -33,17 +34,6 @@ pub enum InputType {
     Graph(GraphInput),
 }
 
-/*
-pub trait InputOps {
-fn serialize(
-&self,
-mutation_dir: &Path,
-coverage_dir: &Path,
-output_name: &str,
-) -> Result<(), std::io::Error>;
-}
-*/
-
 /// corpus contains a vector of corpus inputs, and the total branch coverage set
 pub struct BytesCorpus {
     pub inputs: Vec<BytesInput>,
@@ -62,8 +52,6 @@ pub enum CorpusType {
 }
 
 pub trait CorpusOps {
-    //fn new() -> Self;
-
     fn add(&mut self, new_input: InputType);
 
     /// add a new entry into the corpus.
@@ -75,6 +63,11 @@ pub trait CorpusOps {
     // append corpus entries to the corpus file.
     // a .coverage file will also be created with branch coverage info
     //fn save(&self, output_dir: &Path) -> std::io::Result<()>;
+
+    /// get indices of inputs with matching coverage to the new input
+    fn check_matching_coverage_idx(&self, new: &InputType) -> Vec<usize>;
+
+    fn check_matching_and_sort(&mut self, new: InputType);
 }
 
 impl BytesInput {
@@ -88,25 +81,29 @@ impl BytesInput {
     }
 
     /// Check the coverage of this input with all sanitizers and test for regression
-    pub fn check_sanitizers_coverages(&self, cfg: &Arc<Config>) -> Vec<BTreeSet<u128>> {
-        let mut coverages: Vec<BTreeSet<u128>> = Vec::new();
+    pub fn check_sanitizers_coverages(
+        &self,
+        cfg: &Arc<Config>,
+    ) -> Vec<(ExecResult<Output>, BTreeSet<u128>)> {
+        let mut results_coverages: Vec<(ExecResult<Output>, BTreeSet<u128>)> = Vec::new();
         for san_idx in 0..SANITIZERS.len() {
             let (result, new_cov) = trial(cfg, &self.args, &self.data, san_idx);
-            coverages.push(new_cov)
+            results_coverages.push((result, new_cov))
         }
-        coverages
+        results_coverages
     }
 
     /// Recursively remove bytes from a test input while coverage, stdout,
     /// and stderr remain unchanged.
     /// Very slow for large inputs.
     /// Assumes coverage data is already up to date.
-    pub fn minimize_input(&mut self, exec: &mut Exec) {
+    pub fn minimize_input(&mut self, exec: &Exec) {
         let start_bytesize = self.data.len();
         let chunk_size = 2_usize.pow(max(1, (start_bytesize as i64 / 64) - 2).ilog2());
 
         // compute hash of output stdout, stderr, and exit code for each sanitizer
-        let unmodified_hashes: Vec<BTreeSet<u128>> = self.check_sanitizers_coverages(&exec.cfg);
+        let unmodified_hashes: Vec<(ExecResult<Output>, BTreeSet<u128>)> =
+            self.check_sanitizers_coverages(&exec.cfg);
 
         for byte_idx in (1..self.data.len() - chunk_size + 1)
             .step_by(chunk_size)
@@ -122,7 +119,19 @@ impl BytesInput {
             let hashes_match = unmodified_hashes
                 .iter()
                 .zip(test_hashes.iter())
-                .filter(|&(a, b)| a == b)
+                .filter(|&(a, b)| {
+                    a.1 == b.1
+                        && match (&a.0, &b.0) {
+                            (ExecResult::Ok(..), ExecResult::Ok(..)) => true,
+                            (ExecResult::Err(..), ExecResult::Err(..)) => true,
+                            (
+                                ExecResult::NonTerminatingErr(..),
+                                ExecResult::NonTerminatingErr(..),
+                            ) => true,
+                            (ExecResult::CoverageError(..), ExecResult::CoverageError(..)) => true,
+                            _ => false,
+                        }
+                })
                 .count()
                 == unmodified_hashes.len();
 
@@ -141,7 +150,6 @@ impl BytesInput {
         );
     }
 
-    //} impl InputOps for BytesInput {
     /// Serialize the test input to an output directory for logging.
     /// Two files will be created: a .mutation file containing the mutated
     /// input, and a .coverage file containing the set of code branches hit
@@ -151,8 +159,6 @@ impl BytesInput {
         coverage_dir: &Path,
         output_name: &str,
     ) -> Result<(), std::io::Error> {
-        //let mut hits = self.coverage.clone().iter().collect::<Vec<u128>>();
-        //hits.sort();
         let hit_str = self
             .coverage
             .iter()
@@ -406,6 +412,43 @@ impl CorpusOps for BytesCorpus {
             _ => panic!(),
         }
     }
+
+    fn check_matching_coverage_idx(&self, new: &InputType) -> Vec<usize> {
+        let cov = match new {
+            InputType::Bytes(ref n) => &n.coverage,
+            InputType::Graph(ref n) => &n.coverage,
+        };
+        self.inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, input)| {
+                if &input.coverage == cov {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .rev()
+            .collect::<Vec<usize>>()
+    }
+
+    fn check_matching_and_sort(&mut self, new: InputType) {
+        let check_duplicates = self.check_matching_coverage_idx(&new);
+        if !check_duplicates.is_empty() {
+            let mut duplicates: Vec<InputType> = vec![new.clone()];
+            for i in check_duplicates {
+                duplicates.push(InputType::Bytes(self.inputs.remove(i)));
+            }
+            duplicates.sort();
+            let keep = duplicates.remove(0);
+            match keep {
+                InputType::Bytes(k) => {
+                    self.inputs.push(k);
+                }
+                _ => panic!(),
+            };
+        }
+    }
 }
 
 impl GraphCorpus {
@@ -477,6 +520,43 @@ impl CorpusOps for GraphCorpus {
             _ => panic!(),
         }
     }
+
+    fn check_matching_coverage_idx(&self, new: &InputType) -> Vec<usize> {
+        let cov = match new {
+            InputType::Bytes(ref n) => &n.coverage,
+            InputType::Graph(ref n) => &n.coverage,
+        };
+        self.inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, input)| {
+                if &input.coverage == cov {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .rev()
+            .collect::<Vec<usize>>()
+    }
+
+    fn check_matching_and_sort(&mut self, new: InputType) {
+        let check_duplicates = self.check_matching_coverage_idx(&new);
+        if !check_duplicates.is_empty() {
+            let mut duplicates: Vec<InputType> = vec![new.clone()];
+            for i in check_duplicates {
+                duplicates.push(InputType::Graph(self.inputs.remove(i)));
+            }
+            duplicates.sort();
+            let keep = duplicates.remove(0);
+            match keep {
+                InputType::Graph(k) => {
+                    self.inputs.push(k);
+                }
+                _ => panic!(),
+            };
+        }
+    }
 }
 
 impl CorpusType {
@@ -507,6 +587,20 @@ impl CorpusOps for CorpusType {
         match self {
             CorpusType::Bytes(c) => c.add_and_distill_corpus(new),
             CorpusType::Graph(c) => c.add_and_distill_corpus(new),
+        }
+    }
+
+    fn check_matching_coverage_idx(&self, new: &InputType) -> Vec<usize> {
+        match self {
+            CorpusType::Bytes(c) => c.check_matching_coverage_idx(new),
+            CorpusType::Graph(c) => c.check_matching_coverage_idx(new),
+        }
+    }
+
+    fn check_matching_and_sort(&mut self, new: InputType) {
+        match self {
+            CorpusType::Bytes(c) => c.check_matching_and_sort(new),
+            CorpusType::Graph(c) => c.check_matching_and_sort(new),
         }
     }
 }
@@ -543,38 +637,6 @@ impl std::fmt::Debug for InputType {
             .replace('\n', "\\n"),
             )
             */
-            .finish()
-    }
-}
-
-impl std::fmt::Display for InputType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut print_buf: Vec<u8> = Vec::new();
-        let coverage = match self {
-            InputType::Bytes(s) => {
-                print_buf.extend_from_slice(&s.data[..32]);
-                &s.coverage
-            }
-            InputType::Graph(s) => {
-                //print_buf.extend(&s.encoding.decode()[..32]);
-                &s.coverage
-            }
-        };
-        f.debug_struct("\n    BytesInput: ")
-            .field("coverage", &coverage.len())
-            /*
-               .field(
-               "preview",
-            //&String::from_utf8_lossy(&data[0..min(self.data.len(), 32)]).replace('\n', "\\n"),
-            &String::from_utf8_lossy(&print_buf).replace('\n', "\\n"),
-            )
-            */
-            /*
-               .field(
-               "args",
-               &String::from_utf8_lossy(&self.args[0..min(self.args.len(), 32)]) .replace('\n', "\\n"),
-               )
-               */
             .finish()
     }
 }
@@ -625,19 +687,19 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn test_load_corpus() {
+    fn load_corpus() {
         let corpus = BytesCorpus::load(&PathBuf::from("./examples/cli/input/corpus")).unwrap();
         assert!(!corpus.inputs.is_empty());
     }
 
     #[test]
-    fn test_load_corpus_dir() {
+    fn load_corpus_dir() {
         let corpus = BytesCorpus::load(&PathBuf::from("./tests/")).unwrap();
         assert!(!corpus.inputs.is_empty());
     }
 
     #[test]
-    fn test_initialize_corpus_coverage() {
+    fn initialize_corpus_coverage() {
         let mut corpus = BytesCorpus::load(&PathBuf::from("./examples/cli/input/corpus")).unwrap();
         assert!(!corpus.inputs.is_empty());
 
@@ -646,30 +708,23 @@ mod tests {
         cfg.target_path = Vec::from([PathBuf::from("./examples/cli/fuzz_target.c")]);
         let cfg = Arc::new(cfg);
 
-        // compile target with instrumentation
-        let mut exec = Exec::new(&cfg);
+        // compile target
+        let _exec = Exec::new(&cfg);
 
         // check coverage of initial inputs
-        //corpus.initialize(&mut exec, &vec![]);
         for input in &corpus.inputs {
             let _result = trial(&cfg, &input.args, &input.data, 0);
             if input.coverage.is_subset(&corpus.total_coverage) {
                 continue;
             }
             corpus.total_coverage.extend(&input.coverage);
-            //input.minimize_input(&mut exec);
-            //let mut minimized = input.clone();
-            //minimized.minimize_input(&mut exec);
         }
         corpus.save(&PathBuf::from("./output/cli/")).unwrap();
         let mut corpus2 = BytesCorpus::new();
         for i in &corpus.inputs {
-            //corpus2.add(i.clone());
-            //corpus2.add_and_distill_corpus(i.clone());
             corpus2.add_and_distill_corpus(InputType::Bytes(i.clone()));
         }
         corpus.append(&mut corpus2);
-        //println!("{}", corpus);
     }
 
     #[test]
@@ -683,13 +738,11 @@ mod tests {
 
     #[test]
     fn test_minimize_input() {
-        let test_input = BytesInput {
+        let mut test_input = BytesInput {
             coverage: BTreeSet::new(),
             args: Vec::new(),
             data: b"ABC0000000".to_vec(),
         };
-
-        // executor config
         let mut cfg = Config::defaults();
         cfg.load_env();
         cfg.target_path = Vec::from([PathBuf::from("./examples/cli/fuzz_target.c")]);
@@ -702,7 +755,7 @@ mod tests {
         } else {
             panic!("this input should pass");
         }
-        //test_input.minimize_input(&mut exec);
+        test_input.minimize_input(&exec);
 
         assert_eq!(String::from_utf8_lossy(&test_input.data), "ABC");
         assert_ne!(test_input.data, BytesInput::empty().data);

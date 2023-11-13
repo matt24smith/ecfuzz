@@ -398,16 +398,16 @@ fn handle_trial_result(
     i: &usize,
 ) {
     let total_coverage = match cov_corpus {
-        CorpusType::Bytes(c) => c.total_coverage.clone(),
-        CorpusType::Graph(c) => c.total_coverage.clone(),
+        CorpusType::Bytes(ref c) => &c.total_coverage,
+        CorpusType::Graph(ref c) => &c.total_coverage,
     };
     let crash_coverage = match crash_corpus {
-        CorpusType::Bytes(c) => c.total_coverage.clone(),
-        CorpusType::Graph(c) => c.total_coverage.clone(),
+        CorpusType::Bytes(ref c) => &c.total_coverage,
+        CorpusType::Graph(ref c) => &c.total_coverage,
     };
     let input_coverage = match corpus_entry {
-        InputType::Bytes(ref c) => c.coverage.clone(),
-        InputType::Graph(ref c) => c.coverage.clone(),
+        InputType::Bytes(ref c) => &c.coverage,
+        InputType::Graph(ref c) => &c.coverage,
     };
     match result {
         // if the report contains new coverage, add to corpus as BytesInput
@@ -415,39 +415,22 @@ fn handle_trial_result(
             if !total_coverage.is_superset(&input_coverage) =>
         {
             log_new_coverage(&corpus_entry, i, cfg.plaintext);
-            match cov_corpus {
-                CorpusType::Bytes(cov_corpus) => {
-                    cov_corpus.add_and_distill_corpus(corpus_entry);
-                    cov_corpus
-                        .save(&cfg.output_dir.join(Path::new("corpus")))
-                        .expect("saving corpus to output directory");
-                }
-                CorpusType::Graph(cov_corpus) => {
-                    cov_corpus.add_and_distill_corpus(corpus_entry);
-                    //cov_corpus .save(&cfg.output_dir.join(Path::new("corpus")), stdin_graph.graph) .expect("saving corpus to output directory");
-                    eprintln!("TODO: Implement graph corpus saving");
-                }
-            }
+            cov_corpus.add_and_distill_corpus(corpus_entry);
+            cov_corpus
+                .save(&cfg.output_dir, None)
+                .expect("saving corpus");
+            eprintln!("TODO: Implement graph corpus saving");
         }
 
         // if the input resulted in a crash covering new code branches,
         // add it to the crash log
         ExecResult::Err(output) if !crash_coverage.is_superset(&input_coverage) => {
             log_crash_new(&corpus_entry, i, &output.stderr, cfg.plaintext);
-
-            match crash_corpus {
-                CorpusType::Bytes(crash_corpus) => {
-                    crash_corpus.add_and_distill_corpus(corpus_entry);
-                    crash_corpus
-                        .save(&cfg.output_dir.join(Path::new("crashes")))
-                        .expect("saving crash corpus");
-                }
-                CorpusType::Graph(crash_corpus) => {
-                    crash_corpus.add_and_distill_corpus(corpus_entry);
-                    //crash_corpus .save(&cfg.output_dir.join(Path::new("crashes"))) .expect("saving crash corpus");
-                    eprintln!("TODO: Implement graph corpus saving");
-                }
-            }
+            crash_corpus.add_and_distill_corpus(corpus_entry);
+            crash_corpus
+                .save(&cfg.output_dir, None)
+                .expect("saving crashes");
+            eprintln!("TODO: Implement graph crash saving");
         }
 
         // warn if exited before logging coverage
@@ -483,136 +466,11 @@ fn handle_trial_result(
         }
 
         ExecResult::Ok(_o) => {
-            let cov = match corpus_entry {
-                InputType::Bytes(ref i) => &i.coverage,
-                InputType::Graph(ref i) => &i.coverage,
-            };
-            let check_duplicates = match cov_corpus {
-                CorpusType::Bytes(c) => c
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, input)| {
-                        if &input.coverage == cov {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                    .rev()
-                    .collect::<Vec<usize>>(),
-
-                CorpusType::Graph(c) => c
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, input)| {
-                        if &input.coverage == cov {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                    .rev()
-                    .collect::<Vec<usize>>(),
-            };
-
-            if !check_duplicates.is_empty() {
-                let mut duplicates: Vec<InputType> = vec![corpus_entry.clone()];
-                for i in check_duplicates {
-                    match cov_corpus {
-                        CorpusType::Bytes(ref mut c) => {
-                            duplicates.push(InputType::Bytes(c.inputs.remove(i)));
-                        }
-                        CorpusType::Graph(ref mut c) => {
-                            duplicates.push(InputType::Graph(c.inputs.remove(i)));
-                        }
-                    };
-                }
-
-                duplicates.sort();
-                let keep = duplicates.remove(0);
-                match cov_corpus {
-                    CorpusType::Bytes(ref mut c) => match keep {
-                        InputType::Bytes(i) => {
-                            c.inputs.push(i);
-                        }
-                        _ => panic!(),
-                    },
-                    CorpusType::Graph(ref mut c) => match keep {
-                        InputType::Graph(i) => {
-                            c.inputs.push(i);
-                        }
-                        _ => panic!(),
-                    },
-                };
-            }
+            cov_corpus.check_matching_and_sort(corpus_entry);
         }
 
         ExecResult::Err(_o) => {
-            let cov = match corpus_entry {
-                InputType::Bytes(ref i) => &i.coverage,
-                InputType::Graph(ref i) => &i.coverage,
-            };
-            let check_duplicates = match crash_corpus {
-                CorpusType::Bytes(c) => c
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, input)| {
-                        if &input.coverage == cov {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                    .rev()
-                    .collect::<Vec<usize>>(),
-
-                CorpusType::Graph(c) => c
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, input)| {
-                        if &input.coverage == cov {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    })
-                    .rev()
-                    .collect::<Vec<usize>>(),
-            };
-            if !check_duplicates.is_empty() {
-                let mut duplicates: Vec<InputType> = vec![corpus_entry.clone()];
-                for i in check_duplicates {
-                    match crash_corpus {
-                        CorpusType::Bytes(ref mut c) => {
-                            duplicates.push(InputType::Bytes(c.inputs.remove(i)));
-                        }
-                        CorpusType::Graph(ref mut c) => {
-                            duplicates.push(InputType::Graph(c.inputs.remove(i)));
-                        }
-                    };
-                }
-
-                duplicates.sort();
-                let keep = duplicates.remove(0);
-                match crash_corpus {
-                    CorpusType::Bytes(ref mut c) => match keep {
-                        InputType::Bytes(i) => {
-                            c.inputs.push(i);
-                        }
-                        _ => panic!(),
-                    },
-                    CorpusType::Graph(ref mut c) => match keep {
-                        InputType::Graph(i) => {
-                            c.inputs.push(i);
-                        }
-                        _ => panic!(),
-                    },
-                };
-            }
+            crash_corpus.check_matching_and_sort(corpus_entry);
         }
     }
 }
@@ -626,7 +484,6 @@ pub fn prepare_mutation_bytes(cov_corpus: &CorpusType, engine: &mut Mutation) ->
             InputType::Bytes(BytesInput {
                 data: engine.data.clone(),
                 args: Vec::new(), /* args will be populated by exec_target from cfg.run_args */
-                //coverage: BTreeSet::new(),
                 coverage: c.inputs[idx].coverage.clone(),
             })
         }
@@ -858,7 +715,6 @@ impl Exec {
     /// update the corpus with inputs yielding new coverage
     pub fn exec_loop(
         &self,
-        //cfg: Arc<Config>,
         cov_corpus: &mut CorpusType,
         crash_corpus: &mut CorpusType,
         engine: &mut Mutation,

@@ -20,7 +20,7 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 [dependencies]
 async-std = "1.12"
 futures = {version = "*", features = ["executor",] }
-petgraph = {version = "0.6", features= ["graphmap"]}
+petgraph = {version = "0.6", features = []}
 rayon = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

@@ -813,6 +813,7 @@ mod tests {
     fn display_graph() {
         let mut buf: Vec<u8> = Vec::new();
         let mut f = std::fs::File::open(PathBuf::from("./tests/phone_number.grammar")).unwrap();
+        //let mut f = std::fs::File::open(PathBuf::from("./tests/sqlite.grammar")).unwrap();
 
         let g: GraphTree;
         f.read_to_end(&mut buf).unwrap();
